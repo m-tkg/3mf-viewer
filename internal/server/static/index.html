@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3mf-viewer</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 3l11 6v14l-11 6-11-6V9z' fill='%234d9bff'/%3E%3Cpath d='M16 3v26M5 9l22 14M27 9L5 23' stroke='%2314171c' stroke-width='1.5' fill='none'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <header class="side-head">
+      <h1>3mf-viewer</h1>
+      <div id="root-path" class="muted" title=""></div>
+      <input id="filter" type="search" placeholder="ファイルを絞り込み" autocomplete="off">
+      <div id="count" class="muted"></div>
+    </header>
+    <ul id="file-list"></ul>
+  </aside>
+  <main id="main">
+    <header class="main-head">
+      <div class="titles">
+        <div id="title" class="title">ファイルを選択</div>
+        <div id="subtitle" class="muted"></div>
+      </div>
+      <div class="actions">
+        <button id="copy-name" type="button" disabled>ファイル名をコピー</button>
+        <button id="copy-path" type="button" disabled>パスをコピー</button>
+      </div>
+    </header>
+    <div id="items" class="items" hidden></div>
+    <div id="viewer">
+      <canvas id="canvas"></canvas>
+      <div id="message" class="message">左の一覧からモデルを選択してください</div>
+      <div id="toolbar" hidden>
+        <label><input id="opt-grid" type="checkbox" checked> グリッド</label>
+        <label><input id="opt-edges" type="checkbox"> ワイヤー</label>
+        <button id="reset-view" type="button">視点リセット</button>
+      </div>
+    </div>
+    <footer id="status" class="muted">左ドラッグ: 回転 / ホイール: ズーム / 右ドラッグ: パン</footer>
+  </main>
+</div>
+<div id="toast" role="status" aria-live="polite"></div>
+<script type="module" src="app.js"></script>
+</body>
+</html>
