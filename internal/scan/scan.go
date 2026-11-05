@@ -50,6 +50,8 @@ type Root struct {
 	Dir string
 	// single は単一ファイル指定のときのファイル名 (それ以外は "")。
 	single string
+	// target は単一ファイル指定のときの、シンボリックリンク解決後の実ファイルパス。
+	target string
 	// display はユーザーが指定した (リンク未解決の) 絶対ディレクトリ。AbsPath の表示に使う。
 	display string
 }
@@ -73,6 +75,11 @@ func NewRoot(p string) (*Root, error) {
 		}
 		r.display = filepath.Dir(abs)
 		r.single = filepath.Base(abs)
+		// 指定ファイル自体がシンボリックリンクでも読めるよう、ファイル単位で解決しておく。
+		r.target, err = filepath.EvalSymlinks(abs)
+		if err != nil {
+			return nil, err
+		}
 	}
 	r.Dir, err = filepath.EvalSymlinks(r.display)
 	if err != nil {
@@ -89,7 +96,7 @@ func hidden(name string) bool {
 // inside は resolved (リンク解決済み絶対パス) がルート配下かを返す。
 func (r *Root) inside(resolved string) bool {
 	if r.single != "" {
-		return resolved == filepath.Join(r.Dir, r.single)
+		return resolved == r.target
 	}
 	return resolved == r.Dir || strings.HasPrefix(resolved, r.Dir+string(filepath.Separator))
 }

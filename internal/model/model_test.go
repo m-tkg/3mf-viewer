@@ -295,3 +295,69 @@ func TestLoadDispatch(t *testing.T) {
 		t.Error("unsupported ext should fail")
 	}
 }
+
+func TestParse3MFRejectsNonFinite(t *testing.T) {
+	for _, bad := range []string{"NaN", "Inf", "-Inf", "1e999"} {
+		model := `<model xmlns="x"><resources><object id="1"><mesh><vertices>
+<vertex x="` + bad + `" y="0" z="0"/><vertex x="1" y="0" z="0"/><vertex x="0" y="1" z="0"/></vertices>
+<triangles><triangle v1="0" v2="1" v3="2"/></triangles></mesh></object></resources><build><item objectid="1"/></build></model>`
+		if _, err := Parse3MF(make3MF(t, map[string]string{"3D/3dmodel.model": model})); err == nil {
+			t.Errorf("vertex %q should be rejected", bad)
+		}
+	}
+	// 変換行列で float32 を溢れさせる場合もエラーにする (JSON 化できない値を出さない)。
+	model := `<model xmlns="x"><resources><object id="1">` + tetra + `</object></resources>
+<build><item objectid="1" transform="1e38 0 0 0 1 0 0 0 1 0 0 0"/><item objectid="1" transform="1e39 0 0 0 1 0 0 0 1 0 0 0"/></build></model>`
+	if _, err := Parse3MF(make3MF(t, map[string]string{"3D/3dmodel.model": model})); err == nil {
+		t.Error("overflowing transform should be rejected")
+	}
+}
+
+func TestParse3MFLimits(t *testing.T) {
+	oldT, oldV := maxTriangles, maxVertices
+	defer func() { maxTriangles, maxVertices = oldT, oldV }()
+
+	model := `<model xmlns="x"><resources><object id="1">` + tetra + `</object></resources><build><item objectid="1"/></build></model>`
+	p := make3MF(t, map[string]string{"3D/3dmodel.model": model})
+
+	maxTriangles, maxVertices = 3, 100 // 三角形 4 > 3
+	if _, err := Parse3MF(p); err == nil {
+		t.Error("triangle limit should apply while parsing")
+	}
+	maxTriangles, maxVertices = 100, 3 // 頂点 4 > 3
+	if _, err := Parse3MF(p); err == nil {
+		t.Error("vertex limit should apply while parsing")
+	}
+	maxTriangles, maxVertices = 100, 100
+	if _, err := Parse3MF(p); err != nil {
+		t.Errorf("within limits should pass: %v", err)
+	}
+}
+
+func TestParse3MFExternalPathCaseInsensitive(t *testing.T) {
+	// 同じ外部ファイルを大文字小文字・先頭 "/" 違いで参照しても解決できる。
+	main := `<model xmlns="x" xmlns:p="y"><resources>
+<object id="2"><components>
+<component p:path="/3D/Objects/O1.model" objectid="1"/>
+<component p:path="3d/objects/o1.model" objectid="1"/>
+</components></object></resources><build><item objectid="2"/></build></model>`
+	sub := `<model xmlns="x"><resources><object id="1">` + tetra + `</object></resources></model>`
+	m, err := Parse3MF(make3MF(t, map[string]string{"3D/3dmodel.model": main, "3D/Objects/o1.model": sub}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Items[0].Mesh.Indices) != 24 {
+		t.Fatalf("indices = %d", len(m.Items[0].Mesh.Indices))
+	}
+	// 外部ファイル側の名前解決: p:path 付き build item は参照先のオブジェクト名を使う。
+	main2 := `<model xmlns="x" xmlns:p="y"><resources></resources>
+<build><item objectid="1" p:path="/3D/Objects/o1.model"/></build></model>`
+	sub2 := `<model xmlns="x"><resources><object id="1" name="ExternalPart">` + tetra + `</object></resources></model>`
+	m2, err := Parse3MF(make3MF(t, map[string]string{"3D/3dmodel.model": main2, "3D/Objects/o1.model": sub2}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m2.Items[0].Name != "ExternalPart" {
+		t.Fatalf("name = %q", m2.Items[0].Name)
+	}
+}

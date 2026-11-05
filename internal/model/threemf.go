@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -81,6 +82,8 @@ type modelFile struct {
 	objects   map[string]*object
 	order     []string // objects の出現順
 	build     []buildItem
+	triCount  int // 読み込んだ三角形数
+	vertCount int // 読み込んだ頂点数
 }
 
 // Parse3MF は 3MF (zip) を読み、build item ごとにメッシュを平坦化した Model を返す。
@@ -102,20 +105,27 @@ func Parse3MF(filename string) (*Model, error) {
 	}
 
 	names := z.objectNames() // Bambu / Orca の model_settings.config
-	loaded := map[string]*modelFile{rootPath: root}
+	// z.open は大文字小文字・先頭 "/" を区別しないので、キャッシュキーも同じ規則で正規化する。
+	normKey := func(n string) string { return strings.ToLower(strings.TrimPrefix(n, "/")) }
+	loaded := map[string]*modelFile{normKey(rootPath): root}
+	loadedTris := root.triCount // 外部ファイルを含む総三角形数
 	getFile := func(name string) (*modelFile, error) {
 		if name == "" {
 			return root, nil
 		}
-		name = strings.TrimPrefix(name, "/")
-		if mf, ok := loaded[name]; ok {
+		key := normKey(name)
+		if mf, ok := loaded[key]; ok {
 			return mf, nil
 		}
 		mf, err := z.loadModel(name)
 		if err != nil {
 			return nil, err
 		}
-		loaded[name] = mf
+		loadedTris += mf.triCount
+		if loadedTris > maxTriangles {
+			return nil, errors.New("3MF: too many triangles")
+		}
+		loaded[key] = mf
 		return mf, nil
 	}
 
@@ -157,15 +167,23 @@ func Parse3MF(filename string) (*Model, error) {
 				mesh.Vertices[k] = float32(float64(mesh.Vertices[k]) * s)
 			}
 		}
+		// 参照先ファイル (p:path 付きの item なら外部ファイル) のオブジェクト名を優先し、
+		// 無ければ model_settings.config の名前 (ルートのオブジェクト ID に対するもの) を使う。
 		name := ""
-		if o := root.objects[it.objectID]; o != nil && it.file == "" {
+		if o := mf.objects[it.objectID]; o != nil {
 			name = o.name
-			if name == "" {
-				name = names[it.objectID]
-			}
+		}
+		if name == "" && it.file == "" {
+			name = names[it.objectID]
 		}
 		if name == "" {
 			name = "Object " + it.objectID
+		}
+		// 変換行列・単位の適用でオーバーフローした値も含め、非有限値は JSON 化できないので弾く。
+		for _, v := range mesh.Vertices {
+			if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+				return nil, fmt.Errorf("3MF: object %q has non-finite coordinates", it.objectID)
+			}
 		}
 		m.Items = append(m.Items, Item{ID: strconv.Itoa(i), Name: name, Mesh: mesh})
 	}
@@ -184,7 +202,11 @@ type flattener struct {
 	count int // 展開した三角形の総数 (爆発的な参照の抑止)
 }
 
-const maxTriangles = 20_000_000
+// 読み込みの上限。テストで差し替えられるよう var にしている。
+var (
+	maxTriangles = 20_000_000 // 1 つの 3MF 全体で許す三角形数
+	maxVertices  = 20_000_000 // 1 つの 3MF 全体で許す頂点数
+)
 
 func (f *flattener) flatten(mf *modelFile, id string, t affine, depth int) error {
 	if depth > maxDepth {
@@ -379,10 +401,15 @@ func (z *zipFiles) loadModel(name string) (*modelFile, error) {
 				var p [3]float32
 				for i, k := range []string{"x", "y", "z"} {
 					v, err := strconv.ParseFloat(attr(t, k), 32)
-					if err != nil {
+					// ParseFloat は "NaN" / "Inf" も受理するので、有限値だけを通す。
+					if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
 						return nil, fmt.Errorf("3MF: invalid vertex in object %s", cur.id)
 					}
 					p[i] = float32(v)
+				}
+				mf.vertCount++
+				if mf.vertCount > maxVertices {
+					return nil, errors.New("3MF: too many vertices")
 				}
 				cur.verts = append(cur.verts, p[0], p[1], p[2])
 			case "triangle":
@@ -397,6 +424,10 @@ func (z *zipFiles) loadModel(name string) (*modelFile, error) {
 						return nil, fmt.Errorf("3MF: invalid triangle index in object %s", cur.id)
 					}
 					idx[i] = uint32(v)
+				}
+				mf.triCount++
+				if mf.triCount > maxTriangles {
+					return nil, errors.New("3MF: too many triangles")
 				}
 				cur.tris = append(cur.tris, idx[0], idx[1], idx[2])
 			case "component":

@@ -156,3 +156,34 @@ func TestDiff(t *testing.T) {
 		t.Fatal("same list should give empty diff")
 	}
 }
+
+func TestSingleFileSymlinkRoot(t *testing.T) {
+	base := t.TempDir()
+	touch(t, filepath.Join(base, "real", "model.stl"))
+	touch(t, filepath.Join(base, "other.stl"))
+	linkDir := filepath.Join(base, "links")
+	if err := os.MkdirAll(linkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(linkDir, "link.stl")
+	if err := os.Symlink(filepath.Join(base, "real", "model.stl"), link); err != nil {
+		t.Skip("symlink unsupported:", err)
+	}
+	r, err := NewRoot(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := r.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := paths(files); !reflect.DeepEqual(got, []string{"link.stl"}) {
+		t.Fatalf("list = %v", got)
+	}
+	if _, err := r.Resolve("link.stl"); err != nil {
+		t.Fatalf("symlinked single file must be readable: %v", err)
+	}
+	if _, err := r.Resolve("other.stl"); err == nil {
+		t.Fatal("other files must stay unreachable")
+	}
+}

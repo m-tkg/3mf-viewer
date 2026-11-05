@@ -10,6 +10,7 @@ const state = {
   model: null, // 読み込み済みモデル (API レスポンス)
   item: 'all', // 'all' | item index
   loadSeq: 0,
+  loading: 0, // 進行中のプレビュー読み込み数
 };
 
 // ---------- ユーティリティ ----------
@@ -231,8 +232,11 @@ const thumbs = (() => {
   let camera = null;
   let holder = null;
 
+  const MAX_THUMB_TRIANGLES = 1_500_000;
+  const BIG_MARK = 'big'; // localStorage 上で「巨大のため省略」を表す値
   const sigOf = (f) => `${f.size}:${f.modTime}`;
-  const lsKey = (f) => `3mfv:thumb:${f.path}`;
+  const lsKeyOf = (path) => `3mfv:thumb:${path}`;
+  const lsKey = (f) => lsKeyOf(f.path);
 
   function lsGet(f) {
     try {
@@ -306,17 +310,27 @@ const thumbs = (() => {
     if (running) return;
     running = true;
     while (queue.length) {
+      // ユーザーがプレビューを開いている間は、重い取得・描画が競合しないよう待つ。
+      while (state.loading > 0) await new Promise((r) => setTimeout(r, 200));
       const f = queue.shift();
       queued.delete(f.path);
       const cur = state.files.find((x) => x.path === f.path);
       if (!cur) continue;
       let url = null;
+      let big = false;
       try {
         const model = await getJSON(`/api/model?path=${encodeURIComponent(cur.path)}`);
-        url = renderModel(model);
-        lsSet(cur, url);
+        // 3MF は圧縮されているため、ファイルサイズが小さくても展開後は巨大なことがある。
+        const tris = model.items.reduce((n, it) => n + it.triangleCount, 0);
+        if (tris > MAX_THUMB_TRIANGLES) {
+          big = true;
+          lsSet(cur, BIG_MARK);
+        } else {
+          url = renderModel(model);
+          lsSet(cur, url);
+        }
       } catch (e) { /* サムネ失敗は「表示不可」とする */ }
-      mem.set(cur.path, { sig: sigOf(cur), url });
+      mem.set(cur.path, { sig: sigOf(cur), url, big });
       for (const el of document.querySelectorAll('.thumb')) {
         if (el.dataset.path === cur.path) apply(cur, el);
       }
@@ -344,6 +358,11 @@ const thumbs = (() => {
       return;
     }
     const cached = lsGet(f);
+    if (cached === BIG_MARK) {
+      mem.set(f.path, { sig: sigOf(f), url: null, big: true });
+      apply(f, el);
+      return;
+    }
     if (cached) {
       mem.set(f.path, { sig: sigOf(f), url: cached });
       apply(f, el);
@@ -355,7 +374,14 @@ const thumbs = (() => {
     pump();
   }
 
-  return { observe: (el) => io.observe(el), forget: (path) => mem.delete(path) };
+  // ファイルが変更・削除されたら、メモリと localStorage の両方のキャッシュを捨てる。
+  // (サイズ・更新時刻が過去の値に戻ったときに古いサムネイルが復活しないようにする)
+  function forget(path) {
+    mem.delete(path);
+    try { localStorage.removeItem(lsKeyOf(path)); } catch (e) { /* 無視 */ }
+  }
+
+  return { observe: (el) => io.observe(el), forget };
 })();
 
 // ---------- 一覧 ----------
@@ -459,7 +485,16 @@ function select(path) {
   loadModel({ keepCamera: false });
 }
 
-async function loadModel({ keepCamera }) {
+async function loadModel(opts) {
+  state.loading++;
+  try {
+    await loadModelInner(opts);
+  } finally {
+    state.loading--;
+  }
+}
+
+async function loadModelInner({ keepCamera }) {
   const f = currentFile();
   updateHeader();
   if (!f) {
