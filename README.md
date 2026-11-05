@@ -86,9 +86,9 @@ HTTP API:
 
 ### 同梱ライブラリ
 
-`internal/server/static/vendor/` に [three.js](https://threejs.org/) r170 (MIT, `LICENSE-three.txt`) を同梱している。
+`internal/server/static/lib/` に [three.js](https://threejs.org/) r170 (MIT, `LICENSE-three.txt`) を同梱している。
 `OrbitControls.js` は import 指定を `'three'` から `'./three.module.js'` に書き換えている (import map を使わずに CSP を厳格に保つため)。
 
 ## ライセンス
 
-本体のライセンスは未設定。同梱の three.js は MIT (`internal/server/static/vendor/LICENSE-three.txt`)。
+本体のライセンスは未設定。同梱の three.js は MIT (`internal/server/static/lib/LICENSE-three.txt`)。

@@ -1,5 +1,5 @@
-import * as THREE from './vendor/three.module.js';
-import { OrbitControls } from './vendor/OrbitControls.js';
+import * as THREE from './lib/three.module.js';
+import { OrbitControls } from './lib/OrbitControls.js';
 
 const $ = (id) => document.getElementById(id);
 const PALETTE = [0x6aa9ff, 0xffb454, 0x7ee787, 0xff7b72, 0xd2a8ff, 0x56d4dd, 0xf2cc60, 0xff9bce];

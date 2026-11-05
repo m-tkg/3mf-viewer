@@ -135,7 +135,7 @@ func TestModelErrors(t *testing.T) {
 
 func TestStaticAndHeaders(t *testing.T) {
 	ts, _ := newTestServer(t)
-	for _, p := range []string{"/", "/app.js", "/style.css", "/vendor/three.module.js", "/vendor/OrbitControls.js"} {
+	for _, p := range []string{"/", "/app.js", "/style.css", "/lib/three.module.js", "/lib/OrbitControls.js"} {
 		res, body := get(t, ts, p)
 		if res.StatusCode != 200 || len(body) == 0 {
 			t.Errorf("%s: status %d len %d", p, res.StatusCode, len(body))
