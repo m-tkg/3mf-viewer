@@ -480,6 +480,9 @@ function renderList() {
   }
 }
 
+// 過去に見たファイル情報 (path -> file)。SSE の removed/added から「改名」を判別するために使う。
+const lastSeen = new Map();
+
 async function refreshFiles() {
   try {
     state.files = await getJSON('/api/files');
@@ -487,7 +490,38 @@ async function refreshFiles() {
     toast(`一覧の取得に失敗: ${e.message}`);
     return;
   }
+  for (const f of state.files) lastSeen.set(f.path, f);
   renderList();
+}
+
+// SSE の差分のうち、removed と added が同一ファイル (同じフォルダ・種別・サイズ・更新時刻) の
+// 対になっているものを改名とみなし、旧パス -> 新パスの Map を返す。
+function detectRenames(c) {
+  const out = new Map();
+  const used = new Set();
+  for (const p of c.removed) {
+    const o = lastSeen.get(p);
+    if (!o) continue;
+    const q = c.added.find((a) => {
+      if (used.has(a)) return false;
+      const n = state.files.find((f) => f.path === a);
+      return n && n.dir === o.dir && n.kind === o.kind && n.size === o.size && n.modTime === o.modTime;
+    });
+    if (q) {
+      used.add(q);
+      out.set(p, q);
+    }
+  }
+  return out;
+}
+
+// 選択中のファイルが改名されたとき、モデルは再取得せず、選択・ハッシュ・表示だけを新しいパスへ移す。
+function followRename(from, to) {
+  if (state.selected !== from) return;
+  state.selected = to;
+  history.replaceState(null, '', `#${encodeURIComponent(to)}`);
+  for (const li of document.querySelectorAll('.file')) li.classList.toggle('selected', li.dataset.path === to);
+  updateHeader();
 }
 
 // ---------- 選択・プレビュー ----------
@@ -651,10 +685,9 @@ async function submitRename(ev) {
     const res = await postJSON('/api/rename', { path: f.path, name });
     renameDlg.dlg.close();
     thumbs.move(f.path, res.path);
-    const wasSelected = state.selected === f.path;
     toast(`名前を変更した: ${res.path.split('/').pop()}`);
     await refreshFiles();
-    if (wasSelected) select(res.path);
+    followRename(f.path, res.path); // 直後の SSE (removed/added) は改名として判別され、再読み込みしない
   } catch (e) {
     renameDlg.err.textContent = e.message;
     renameDlg.input.focus();
@@ -675,9 +708,22 @@ function connectEvents() {
   es.addEventListener('change', async (ev) => {
     let c;
     try { c = JSON.parse(ev.data); } catch (e) { return; }
-    for (const p of [...c.modified, ...c.removed]) thumbs.forget(p);
     await refreshFiles();
+    const renames = detectRenames(c);
+    const renamedTo = new Set(renames.values());
+    for (const p of c.modified) thumbs.forget(p);
+    for (const p of c.removed) {
+      const to = renames.get(p);
+      if (to) {
+        thumbs.move(p, to);
+        followRename(p, to);
+      } else {
+        thumbs.forget(p);
+      }
+      lastSeen.delete(p);
+    }
     if (!state.selected) return;
+    if (renamedTo.has(state.selected)) return; // 改名のみ: 内容は同じなので再読み込みしない
     if (c.removed.includes(state.selected) || c.added.includes(state.selected)) {
       loadModel({ keepCamera: false });
     } else if (c.modified.includes(state.selected)) {

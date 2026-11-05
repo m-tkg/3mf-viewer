@@ -331,3 +331,43 @@ func TestRenameNoReplaceRace(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// 大文字小文字を区別する FS で、同じ inode を指す a.stl / A.stl の別エントリがあるとき、上書きしない。
+func TestRenameDoesNotOverwriteCaseVariantHardlink(t *testing.T) {
+	dir := t.TempDir()
+	touch(t, filepath.Join(dir, "a.stl"))
+	if err := os.Link(filepath.Join(dir, "a.stl"), filepath.Join(dir, "A.stl")); err != nil {
+		t.Skip("hard link unsupported:", err)
+	}
+	ents, _ := os.ReadDir(dir)
+	if len(ents) < 2 {
+		t.Skip("case-insensitive filesystem")
+	}
+	r, err := NewRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Rename("a.stl", "A"); !errors.Is(err, ErrExists) {
+		t.Fatalf("want ErrExists, got %v", err)
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 2 {
+		t.Fatalf("entries changed: %v", ents)
+	}
+}
+
+// NFD で保存された名前を、NFC の同じ名前 (ブラウザ入力) で改名しても、自分自身との衝突にならない。
+func TestRenameNormalizationVariant(t *testing.T) {
+	dir := t.TempDir()
+	nfd := "\u304b\u3099" // か + 結合濁点
+	touch(t, filepath.Join(dir, nfd+".stl"))
+	r, err := NewRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Rename(nfd+".stl", "\u304c"); err != nil && !errors.Is(err, ErrSameName) {
+		t.Fatalf("got %v", err)
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 1 {
+		t.Fatalf("entries: %v", ents)
+	}
+}

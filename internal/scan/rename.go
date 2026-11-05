@@ -101,12 +101,21 @@ func (r *Root) Rename(rel, base string) (string, error) {
 		return "", ErrNotAllowed
 	}
 	if dstInfo, err := os.Lstat(dst); err == nil {
-		// 大文字小文字のみの変更 (大文字小文字を区別しない FS) は同一ファイルを指すので、通常の rename で行う。
-		if os.SameFile(srcInfo, dstInfo) && strings.EqualFold(oldName, newName) {
-			if err := os.Rename(src, dst); err != nil {
+		// dst に Lstat が通っても、ディレクトリに newName と完全一致するエントリが無く、かつ src と同一ファイルなら、
+		// 大文字小文字・Unicode 正規化 (NFC/NFD) を区別しない FS が同じエントリを別表記で指しているだけ。
+		// この場合は通常の rename で表記だけ変える。完全一致のエントリが既にあれば (区別する FS 上の
+		// ハードリンクなど) 別エントリなので上書きしない。
+		if os.SameFile(srcInfo, dstInfo) {
+			exact, err := hasEntry(dir, newName)
+			if err != nil {
 				return "", err
 			}
-			return strings.TrimPrefix(path.Join(dirRel, newName), "/"), nil
+			if !exact {
+				if err := os.Rename(src, dst); err != nil {
+					return "", err
+				}
+				return strings.TrimPrefix(path.Join(dirRel, newName), "/"), nil
+			}
 		}
 		return "", ErrExists
 	} else if !errors.Is(err, fs.ErrNotExist) {
@@ -116,6 +125,20 @@ func (r *Root) Rename(rel, base string) (string, error) {
 		return "", err
 	}
 	return strings.TrimPrefix(path.Join(dirRel, newName), "/"), nil
+}
+
+// hasEntry は dir 直下に name と完全一致 (バイト列) するエントリがあるか。
+func hasEntry(dir, name string) (bool, error) {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return false, err
+	}
+	for _, e := range ents {
+		if e.Name() == name {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // renameNoReplace は dst が存在しない場合に限り src を dst に移す。
@@ -135,6 +158,10 @@ func renameNoReplace(src, dst string, srcInfo fs.FileInfo) error {
 		}
 		// リンク自体は inode が別になるので、リンク先の文字列が同じかで同一性を判断する。
 		if cur, err := os.Readlink(src); err != nil || cur != target {
+			// 作ったばかりの dst は片付ける (まだ自分が作ったリンクのときだけ)。
+			if t, e := os.Readlink(dst); e == nil && t == target {
+				_ = os.Remove(dst)
+			}
 			if err != nil && errors.Is(err, fs.ErrNotExist) {
 				return nil
 			}
@@ -153,6 +180,8 @@ func renameNoReplace(src, dst string, srcInfo fs.FileInfo) error {
 		// 競合の窓は残るが、直前に存在を再確認したうえで通常の rename にフォールバックする。
 		if _, e := os.Lstat(dst); e == nil {
 			return ErrExists
+		} else if !errors.Is(e, fs.ErrNotExist) {
+			return e
 		}
 		return os.Rename(src, dst)
 	}
