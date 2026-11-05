@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>3mf-viewer</title>
+<meta name="viewer-token" content="__VIEWER_TOKEN__">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 3l11 6v14l-11 6-11-6V9z' fill='%234d9bff'/%3E%3Cpath d='M16 3v26M5 9l22 14M27 9L5 23' stroke='%2314171c' stroke-width='1.5' fill='none'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="style.css">
 </head>
@@ -25,6 +26,7 @@
         <div id="subtitle" class="muted"></div>
       </div>
       <div class="actions">
+        <button id="rename" type="button" disabled>名前を変更</button>
         <button id="copy-name" type="button" disabled>ファイル名をコピー</button>
         <button id="copy-path" type="button" disabled>パスをコピー</button>
       </div>
@@ -42,6 +44,21 @@
     <footer id="status" class="muted">左ドラッグ: 回転 / ホイール: ズーム / 右ドラッグ: パン</footer>
   </main>
 </div>
+<dialog id="rename-dialog">
+  <form method="dialog" id="rename-form" autocomplete="off">
+    <h2>ファイル名を変更</h2>
+    <div id="rename-dir" class="muted"></div>
+    <div class="rename-row">
+      <input id="rename-input" type="text" spellcheck="false" aria-label="新しいファイル名 (拡張子を除く)">
+      <span id="rename-ext"></span>
+    </div>
+    <div id="rename-error" class="rename-error" role="alert"></div>
+    <div class="rename-buttons">
+      <button type="button" id="rename-cancel">キャンセル</button>
+      <button type="submit" id="rename-ok" class="primary">変更</button>
+    </div>
+  </form>
+</dialog>
 <div id="toast" role="status" aria-live="polite"></div>
 <script type="module" src="app.js"></script>
 </body>

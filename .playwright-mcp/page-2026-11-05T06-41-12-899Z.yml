@@ -1,0 +1,48 @@
+- generic [ref=e1]:
+  - generic [ref=e2]:
+    - complementary [ref=e3]:
+      - generic [ref=e4]:
+        - heading "3mf-viewer" [level=1] [ref=e5]
+        - generic "/private/tmp/claude-501/-Users-masaki-git-github-com-m-tkg-3mf-viewer/935d6eed-59d7-4beb-a55c-d9b64ac426e9/scratchpad/rt.dKh8Oa" [ref=e6]
+        - searchbox "ファイルを絞り込み" [ref=e7]
+        - generic [ref=e8]: 2 / 2 ファイル
+      - list [ref=e9]:
+        - listitem "/private/tmp/claude-501/-Users-masaki-git-github-com-m-tkg-3mf-viewer/935d6eed-59d7-4beb-a55c-d9b64ac426e9/scratchpad/rt.dKh8Oa/b.stl" [ref=e61] [cursor=pointer]:
+          - generic [ref=e63]:
+            - generic [ref=e64]: b.stl
+            - generic [ref=e65]: (ルート直下)
+            - generic [ref=e66]:
+              - generic [ref=e67]: stl
+              - generic [ref=e68]: 134 B
+              - button "改名" [ref=e69]
+              - button "名前" [ref=e70]
+              - button "パス" [ref=e71]
+        - listitem "/private/tmp/claude-501/-Users-masaki-git-github-com-m-tkg-3mf-viewer/935d6eed-59d7-4beb-a55c-d9b64ac426e9/scratchpad/rt.dKh8Oa/かめ 1.stl" [ref=e72] [cursor=pointer]:
+          - generic [ref=e74]:
+            - generic [ref=e75]: かめ 1.stl
+            - generic [ref=e76]: (ルート直下)
+            - generic [ref=e77]:
+              - generic [ref=e78]: stl
+              - generic [ref=e79]: 134 B
+              - button "改名" [ref=e80]
+              - button "名前" [ref=e81]
+              - button "パス" [ref=e82]
+    - main [ref=e32]:
+      - generic [ref=e33]:
+        - generic [ref=e34]:
+          - generic [ref=e35]: かめ 1.stl
+          - generic [ref=e36]: /private/tmp/claude-501/-Users-masaki-git-github-com-m-tkg-3mf-viewer/935d6eed-59d7-4beb-a55c-d9b64ac426e9/scratchpad/rt.dKh8Oa/かめ 1.stl
+        - generic [ref=e37]:
+          - button "名前を変更" [active] [ref=e38] [cursor=pointer]
+          - button "ファイル名をコピー" [ref=e39] [cursor=pointer]
+          - button "パスをコピー" [ref=e40] [cursor=pointer]
+      - generic [ref=e43]:
+        - generic [ref=e44]:
+          - checkbox "グリッド" [checked] [ref=e45]
+          - text: グリッド
+        - generic [ref=e46]:
+          - checkbox "ワイヤー" [ref=e47]
+          - text: ワイヤー
+        - button "視点リセット" [ref=e48] [cursor=pointer]
+      - generic [ref=e49]: "STL · 三角形 1 · 寸法 1.0 × 1.0 × 0.0 (モデル単位, 3MF は mm) · 左ドラッグ: 回転 / ホイール: ズーム / 右ドラッグ: パン"
+  - status: "名前を変更した: かめ 1.stl"

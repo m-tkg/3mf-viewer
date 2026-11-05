@@ -2,10 +2,14 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
 	"embed"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +17,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -41,7 +46,15 @@ type Server struct {
 	hub   *hub
 	cache *modelCache
 	mux   *http.ServeMux
+	// token は起動ごとに生成する変更系 API 用トークン。ページに埋め込み、X-Viewer-Token ヘッダで送らせる。
+	token string
+	index []byte // トークン埋め込み前の index.html
 }
+
+const (
+	tokenHeader      = "X-Viewer-Token"
+	tokenPlaceholder = "__VIEWER_TOKEN__"
+)
 
 // New は Server を作る。
 func New(cfg Config) *Server {
@@ -49,8 +62,16 @@ func New(cfg Config) *Server {
 		cfg.Interval = time.Second
 	}
 	s := &Server{cfg: cfg, hub: newHub(), cache: newModelCache(16, 256<<20)}
+	var tb [32]byte
+	if _, err := rand.Read(tb[:]); err != nil {
+		panic(err)
+	}
+	s.token = hex.EncodeToString(tb[:])
 	sub, err := fs.Sub(staticFS, "static")
 	if err != nil {
+		panic(err)
+	}
+	if s.index, err = fs.ReadFile(sub, "index.html"); err != nil {
 		panic(err)
 	}
 	s.mux = http.NewServeMux()
@@ -58,6 +79,9 @@ func New(cfg Config) *Server {
 	s.mux.HandleFunc("/api/files", s.handleFiles)
 	s.mux.HandleFunc("/api/model", s.handleModel)
 	s.mux.HandleFunc("/api/events", s.handleEvents)
+	s.mux.HandleFunc("/api/rename", s.handleRename)
+	s.mux.HandleFunc("/{$}", s.handleIndex)
+	s.mux.HandleFunc("/index.html", s.handleIndex)
 	files := http.FileServer(http.FS(sub))
 	s.mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 埋め込みファイルは更新時刻を持たないため、バージョン更新後に古いキャッシュが残らないよう毎回検証させる。
@@ -74,7 +98,9 @@ func (s *Server) Handler() http.Handler {
 			http.Error(w, "forbidden host", http.StatusForbidden)
 			return
 		}
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/rename" {
+			// 変更系 API。POST のみ許可し、認可は handleRename で行う。
+		} else if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -122,6 +148,93 @@ func (s *Server) Run(ctx context.Context) {
 			prev = cur
 		}
 	}
+}
+
+// handleIndex はトークンを埋め込んだ index.html を返す。
+func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(bytes.ReplaceAll(s.index, []byte(tokenPlaceholder), []byte(s.token)))
+}
+
+// sameOrigin は変更系リクエストが同一オリジンのブラウザ画面から来たかを検証する。
+// Sec-Fetch-Site と Origin の少なくとも一方が必須で、あれば同一オリジンを示していること。
+func sameOrigin(r *http.Request) bool {
+	site := r.Header.Get("Sec-Fetch-Site")
+	origin := r.Header.Get("Origin")
+	if site == "" && origin == "" {
+		return false
+	}
+	if site != "" && site != "same-origin" {
+		return false
+	}
+	if origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.Host != r.Host {
+			return false
+		}
+	}
+	return true
+}
+
+type renameRequest struct {
+	Path string `json:"path"`
+	Name string `json:"name"` // 拡張子を除いた新しい名前
+}
+
+// handleRename は同一ディレクトリ内でのファイル名変更 (拡張子固定・上書き不可)。
+func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !sameOrigin(r) {
+		writeErr(w, http.StatusForbidden, "forbidden origin")
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get(tokenHeader)), []byte(s.token)) != 1 {
+		writeErr(w, http.StatusForbidden, "invalid token")
+		return
+	}
+	// JSON 以外 (フォーム送信など) は受け付けない。クロスオリジンではプリフライトが必要になる。
+	if ct, _, _ := strings.Cut(r.Header.Get("Content-Type"), ";"); strings.TrimSpace(strings.ToLower(ct)) != "application/json" {
+		writeErr(w, http.StatusUnsupportedMediaType, "content-type must be application/json")
+		return
+	}
+	var req renameRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
+	if err := dec.Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	oldAbs, _ := s.cfg.Root.Resolve(req.Path) // キャッシュ破棄用 (失敗しても Rename 側で拒否される)
+	newRel, err := s.cfg.Root.Rename(req.Path, req.Name)
+	if err != nil {
+		switch {
+		case errors.Is(err, scan.ErrNotAllowed):
+			writeErr(w, http.StatusForbidden, "path not allowed")
+		case errors.Is(err, os.ErrNotExist):
+			writeErr(w, http.StatusNotFound, "file not found")
+		case errors.Is(err, scan.ErrInvalidName):
+			writeErr(w, http.StatusBadRequest, strings.TrimPrefix(err.Error(), scan.ErrInvalidName.Error()+": "))
+		case errors.Is(err, scan.ErrExists):
+			writeErr(w, http.StatusConflict, err.Error())
+		case errors.Is(err, scan.ErrSameName), errors.Is(err, scan.ErrSingleRoot):
+			writeErr(w, http.StatusBadRequest, err.Error())
+		default:
+			writeErr(w, http.StatusInternalServerError, "rename failed")
+		}
+		return
+	}
+	if oldAbs != "" {
+		s.cache.dropPath(oldAbs)
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"path": newRel})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -311,6 +424,22 @@ func (c *modelCache) get(k string) ([]byte, bool) {
 	defer c.mu.Unlock()
 	b, ok := c.m[k]
 	return b, ok
+}
+
+// dropPath は abs のファイルに由来するキャッシュを捨てる (キーは "abs|size|mtime")。
+func (c *modelCache) dropPath(abs string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	keep := c.keys[:0]
+	for _, k := range c.keys {
+		if strings.HasPrefix(k, abs+"|") {
+			c.bytes -= len(c.m[k])
+			delete(c.m, k)
+			continue
+		}
+		keep = append(keep, k)
+	}
+	c.keys = keep
 }
 
 func (c *modelCache) put(k string, b []byte) {

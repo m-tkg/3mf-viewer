@@ -130,6 +130,32 @@ button:disabled { opacity: .45; cursor: default; }
 #toolbar[hidden], .items[hidden] { display: none; }
 #status { padding: 6px 14px; border-top: 1px solid var(--line); background: var(--panel); }
 
+dialog {
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px 18px;
+  width: min(480px, 90vw);
+}
+dialog::backdrop { background: rgba(0, 0, 0, .55); }
+dialog h2 { margin: 0 0 6px; font-size: 15px; }
+.rename-row { display: flex; align-items: center; gap: 6px; margin-top: 10px; }
+#rename-input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+}
+#rename-ext { color: var(--muted); }
+.rename-error { min-height: 1.4em; margin-top: 8px; color: #ff8b8b; font-size: 12px; overflow-wrap: anywhere; }
+.rename-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+button.primary { background: var(--accent-bg); border-color: var(--accent); }
+
 #toast {
   position: fixed;
   left: 50%;

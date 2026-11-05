@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -185,5 +186,148 @@ func TestSingleFileSymlinkRoot(t *testing.T) {
 	}
 	if _, err := r.Resolve("other.stl"); err == nil {
 		t.Fatal("other files must stay unreachable")
+	}
+}
+
+func TestRename(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "root")
+	touch(t, filepath.Join(dir, "sub", "a.STL"))
+	touch(t, filepath.Join(dir, "b.3mf"))
+	touch(t, filepath.Join(dir, "taken.3mf"))
+	touch(t, filepath.Join(base, "outside.stl"))
+	r, err := NewRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 正常: 拡張子 (大文字小文字含む) と親ディレクトリは保たれる。
+	got, err := r.Rename("sub/a.STL", "新しい 名前")
+	if err != nil || got != "sub/新しい 名前.STL" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sub", "新しい 名前.STL")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "sub", "a.STL")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old name must be gone: %v", err)
+	}
+
+	// 大文字小文字だけの変更は成功する。
+	if got, err := r.Rename("b.3mf", "B"); err != nil || got != "B.3mf" {
+		t.Fatalf("case rename: %q %v", got, err)
+	}
+
+	// 上書き拒否 (どちらのファイルも残る)。
+	if _, err := r.Rename("B.3mf", "taken"); !errors.Is(err, ErrExists) {
+		t.Fatalf("want ErrExists, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "B.3mf")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Rename("B.3mf", "B"); !errors.Is(err, ErrSameName) {
+		t.Fatalf("want ErrSameName, got %v", err)
+	}
+
+	// 不正な名前。
+	long := strings.Repeat("あ", 90) // 270 バイト
+	for _, n := range []string{"", "  ", "a/b", `a\b`, "..", ".hidden", "a\x00b", "a\nb", "a\x7fb", "a‮b", " lead", "trail ", long, "../x"} {
+		if _, err := r.Rename("B.3mf", n); !errors.Is(err, ErrInvalidName) {
+			t.Errorf("name %q: want ErrInvalidName, got %v", n, err)
+		}
+	}
+
+	// 対象パスの不正: 配下外・隠し・対象外拡張子・存在しない。
+	for _, p := range []string{"../outside.stl", "sub/../../outside.stl", "", ".x.stl", "taken.txt"} {
+		if _, err := r.Rename(p, "z"); !errors.Is(err, ErrNotAllowed) {
+			t.Errorf("path %q: want ErrNotAllowed, got %v", p, err)
+		}
+	}
+	if _, err := r.Rename("nope.stl", "z"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "outside.stl")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRenameSymlinks(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "root")
+	touch(t, filepath.Join(dir, "real.stl"))
+	touch(t, filepath.Join(base, "outside", "o.stl"))
+	if err := os.Symlink(filepath.Join(base, "outside"), filepath.Join(dir, "escape")); err != nil {
+		t.Skip("symlink unsupported:", err)
+	}
+	if err := os.Symlink(filepath.Join(base, "outside", "o.stl"), filepath.Join(dir, "out.stl")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real.stl", filepath.Join(dir, "link.stl")); err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 配下外へ出るディレクトリリンク / ファイルリンクは拒否。
+	if _, err := r.Rename("escape/o.stl", "x"); !errors.Is(err, ErrNotAllowed) {
+		t.Errorf("escape dir: %v", err)
+	}
+	if _, err := r.Rename("out.stl", "x"); !errors.Is(err, ErrNotAllowed) {
+		t.Errorf("escape file: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "outside", "o.stl")); err != nil {
+		t.Fatal(err)
+	}
+	// 配下内を指すリンクは、リンク自体を改名する (実体は動かない)。
+	if got, err := r.Rename("link.stl", "renamed"); err != nil || got != "renamed.stl" {
+		t.Fatalf("%q %v", got, err)
+	}
+	if tgt, err := os.Readlink(filepath.Join(dir, "renamed.stl")); err != nil || tgt != "real.stl" {
+		t.Fatalf("link target %q %v", tgt, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "real.stl")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "link.stl")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old link must be gone: %v", err)
+	}
+	// リンクの改名でも上書きしない。
+	if _, err := r.Rename("renamed.stl", "real"); !errors.Is(err, ErrExists) {
+		t.Fatalf("link overwrite: %v", err)
+	}
+}
+
+func TestRenameSingleRoot(t *testing.T) {
+	dir := t.TempDir()
+	touch(t, filepath.Join(dir, "one.stl"))
+	r, err := NewRoot(filepath.Join(dir, "one.stl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Rename("one.stl", "two"); !errors.Is(err, ErrSingleRoot) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// 変更先が確認後に作られても上書きしない (link が EEXIST になる) ことの確認。
+func TestRenameNoReplaceRace(t *testing.T) {
+	dir := t.TempDir()
+	touch(t, filepath.Join(dir, "a.stl"))
+	if err := os.WriteFile(filepath.Join(dir, "b.stl"), []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	si, err := os.Lstat(filepath.Join(dir, "a.stl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := renameNoReplace(filepath.Join(dir, "a.stl"), filepath.Join(dir, "b.stl"), si); !errors.Is(err, ErrExists) {
+		t.Fatalf("got %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "b.stl")); string(b) != "keep" {
+		t.Fatalf("destination overwritten: %q", b)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "a.stl")); err != nil {
+		t.Fatal(err)
 	}
 }
