@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -359,5 +360,48 @@ func TestParse3MFExternalPathCaseInsensitive(t *testing.T) {
 	}
 	if m2.Items[0].Name != "ExternalPart" {
 		t.Fatalf("name = %q", m2.Items[0].Name)
+	}
+}
+
+// ---------- LoadBytes ----------
+
+func TestLoadBytesMatchesLoad(t *testing.T) {
+	m3 := `<?xml version="1.0"?><model unit="centimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
+<resources><object id="1" name="Part" type="model">` + tetra + `</object></resources>
+<build><item objectid="1" transform="1 0 0 0 1 0 0 0 1 5 0 0"/></build></model>`
+	p := make3MF(t, map[string]string{"_rels/.rels": rels, "3D/3dmodel.model": m3})
+	want, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadBytes("dir/Sample.3MF", data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Format != "3mf" || len(got.Items) != 1 || got.Items[0].Name != "Part" ||
+		!reflect.DeepEqual(got.Items[0].Mesh, want.Items[0].Mesh) {
+		t.Fatalf("LoadBytes != Load: %+v vs %+v", got, want)
+	}
+
+	stl := binarySTL([][9]float32{{0, 0, 0, 1, 0, 0, 0, 1, 0}}, "hdr")
+	ms, err := LoadBytes("a/b/tri.stl", stl)
+	if err != nil || ms.Format != "stl" || ms.Items[0].Name != "tri" || len(ms.Items[0].Mesh.Indices) != 3 {
+		t.Fatalf("stl: %+v %v", ms, err)
+	}
+}
+
+func TestLoadBytesErrors(t *testing.T) {
+	if _, err := LoadBytes("x.obj", []byte("x")); err == nil {
+		t.Error("unsupported ext accepted")
+	}
+	if _, err := LoadBytes("x.3mf", []byte("not a zip")); err == nil {
+		t.Error("broken 3mf accepted")
+	}
+	if _, err := LoadBytes("x.stl", []byte("solid x\nendsolid x\n")); err == nil {
+		t.Error("empty stl accepted")
 	}
 }

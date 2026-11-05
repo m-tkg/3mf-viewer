@@ -37,10 +37,11 @@ func getVersion() string {
 	return "dev"
 }
 
-const usage = `使い方: 3mf-viewer [オプション] <path>
+const usage = `使い方: 3mf-viewer [オプション] [path]
 
 <path> 配下 (サブディレクトリ含む) の .3mf / .stl をブラウザでプレビューする。
-<path> にはディレクトリまたは単一ファイルを指定できる。終了は Ctrl+C。
+<path> にはディレクトリまたは単一ファイルを指定できる。省略時はカレントディレクトリ。終了は Ctrl+C。
+画面の「フォルダを開く」から、ブラウザで選んだ別のフォルダも読み込める。
 
 オプション:
 `
@@ -80,9 +81,13 @@ func run(args []string) int {
 		fmt.Println("3mf-viewer", getVersion())
 		return 0
 	}
-	if len(positional) != 1 {
+	if len(positional) > 1 {
 		fs.Usage()
 		return 2
+	}
+	target := "."
+	if len(positional) == 1 {
+		target = positional[0]
 	}
 	portSet := false
 	fs.Visit(func(f *flag.Flag) {
@@ -91,7 +96,7 @@ func run(args []string) int {
 		}
 	})
 
-	root, err := scan.NewRoot(positional[0])
+	root, err := scan.NewRoot(target)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "エラー:", err)
 		return 1

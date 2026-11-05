@@ -2,6 +2,7 @@
 package model
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -70,6 +71,29 @@ func Load(path string) (*Model, error) {
 	}
 	return nil, fmt.Errorf("unsupported file type: %s", filepath.Ext(path))
 }
+
+// LoadBytes は name (拡張子で種別を判定) の内容 data をメモリ上で読み込む。ディスクには触れない。
+func LoadBytes(name string, data []byte) (*Model, error) {
+	if int64(len(data)) > maxFileSize {
+		return nil, fmt.Errorf("file too large: %d bytes", len(data))
+	}
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
+	case ".stl":
+		mesh, err := ParseSTL(data)
+		if err != nil {
+			return nil, err
+		}
+		base := strings.TrimSuffix(filepath.Base(name), filepath.Ext(name))
+		return &Model{Format: "stl", Items: []Item{{ID: "0", Name: base, Mesh: *mesh}}}, nil
+	case ".3mf":
+		return Parse3MFReader(bytes.NewReader(data), int64(len(data)))
+	}
+	return nil, fmt.Errorf("unsupported file type: %s", ext)
+}
+
+// MaxFileSize は読み込みを許す最大ファイルサイズ (バイト)。
+const MaxFileSize = maxFileSize
 
 func readLimited(path string) ([]byte, error) {
 	st, err := os.Stat(path)

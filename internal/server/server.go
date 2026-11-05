@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"math"
 	"net"
@@ -45,7 +46,9 @@ type Server struct {
 	cfg   Config
 	hub   *hub
 	cache *modelCache
-	mux   *http.ServeMux
+	// parseSlots は /api/parse の同時実行数を絞る (本文をメモリに載せるため)。
+	parseSlots chan struct{}
+	mux        *http.ServeMux
 	// token は起動ごとに生成する変更系 API 用トークン。ページに埋め込み、X-Viewer-Token ヘッダで送らせる。
 	token string
 	index []byte // トークン埋め込み前の index.html
@@ -61,7 +64,7 @@ func New(cfg Config) *Server {
 	if cfg.Interval <= 0 {
 		cfg.Interval = time.Second
 	}
-	s := &Server{cfg: cfg, hub: newHub(), cache: newModelCache(16, 256<<20)}
+	s := &Server{cfg: cfg, hub: newHub(), cache: newModelCache(16, 256<<20), parseSlots: make(chan struct{}, 2)}
 	var tb [32]byte
 	if _, err := rand.Read(tb[:]); err != nil {
 		panic(err)
@@ -80,6 +83,7 @@ func New(cfg Config) *Server {
 	s.mux.HandleFunc("/api/model", s.handleModel)
 	s.mux.HandleFunc("/api/events", s.handleEvents)
 	s.mux.HandleFunc("/api/rename", s.handleRename)
+	s.mux.HandleFunc("/api/parse", s.handleParse)
 	s.mux.HandleFunc("/{$}", s.handleIndex)
 	s.mux.HandleFunc("/index.html", s.handleIndex)
 	files := http.FileServer(http.FS(sub))
@@ -98,7 +102,7 @@ func (s *Server) Handler() http.Handler {
 			http.Error(w, "forbidden host", http.StatusForbidden)
 			return
 		}
-		if r.Method == http.MethodPost && r.URL.Path == "/api/rename" {
+		if r.Method == http.MethodPost && (r.URL.Path == "/api/rename" || r.URL.Path == "/api/parse") {
 			// 変更系 API。POST のみ許可し、認可は handleRename で行う。
 		} else if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")
@@ -181,6 +185,80 @@ func sameOrigin(r *http.Request) bool {
 	return true
 }
 
+// authorizePost は POST 系 API 共通の検証 (同一オリジン・トークン・Content-Type)。
+// 満たさない場合はエラーを書き込んで false を返す。
+// 許可していない Content-Type (フォーム送信など) は受け付けない。クロスオリジンではプリフライトが必要になる。
+func (s *Server) authorizePost(w http.ResponseWriter, r *http.Request, wantType string) bool {
+	if !sameOrigin(r) {
+		writeErr(w, http.StatusForbidden, "forbidden origin")
+		return false
+	}
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get(tokenHeader)), []byte(s.token)) != 1 {
+		writeErr(w, http.StatusForbidden, "invalid token")
+		return false
+	}
+	if ct, _, _ := strings.Cut(r.Header.Get("Content-Type"), ";"); strings.TrimSpace(strings.ToLower(ct)) != wantType {
+		writeErr(w, http.StatusUnsupportedMediaType, "content-type must be "+wantType)
+		return false
+	}
+	return true
+}
+
+// maxUploadBytes は /api/parse が受け取る本文の上限。テストで差し替えられるよう var にしている。
+var maxUploadBytes int64 = model.MaxFileSize
+
+// handleParse はブラウザで選んだフォルダ内のファイルの中身を受け取り、既存のパーサで解析して返す。
+// 本文はメモリ上でのみ扱い、ディスクには保存しない。サーバ上のパスは参照しない。
+// クエリ name の拡張子 (.3mf / .stl) で種別を判定する。
+func (s *Server) handleParse(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.authorizePost(w, r, "application/octet-stream") {
+		return
+	}
+	name := r.URL.Query().Get("name")
+	if len(name) > 1024 || scan.Kind(name) == "" {
+		writeErr(w, http.StatusBadRequest, "name must end with .3mf or .stl")
+		return
+	}
+	if r.ContentLength > maxUploadBytes {
+		writeErr(w, http.StatusRequestEntityTooLarge, "file too large")
+		return
+	}
+	select {
+	case s.parseSlots <- struct{}{}:
+		defer func() { <-s.parseSlots }()
+	case <-r.Context().Done():
+		return
+	}
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxUploadBytes))
+	if err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeErr(w, http.StatusRequestEntityTooLarge, "file too large")
+		} else {
+			writeErr(w, http.StatusBadRequest, "failed to read body")
+		}
+		return
+	}
+	m, err := model.LoadBytes(name, data)
+	if err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	body, err := encodeModel(m)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(body)
+}
+
 type renameRequest struct {
 	Path string `json:"path"`
 	Name string `json:"name"` // 拡張子を除いた新しい名前
@@ -193,17 +271,7 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if !sameOrigin(r) {
-		writeErr(w, http.StatusForbidden, "forbidden origin")
-		return
-	}
-	if subtle.ConstantTimeCompare([]byte(r.Header.Get(tokenHeader)), []byte(s.token)) != 1 {
-		writeErr(w, http.StatusForbidden, "invalid token")
-		return
-	}
-	// JSON 以外 (フォーム送信など) は受け付けない。クロスオリジンではプリフライトが必要になる。
-	if ct, _, _ := strings.Cut(r.Header.Get("Content-Type"), ";"); strings.TrimSpace(strings.ToLower(ct)) != "application/json" {
-		writeErr(w, http.StatusUnsupportedMediaType, "content-type must be application/json")
+	if !s.authorizePost(w, r, "application/json") {
 		return
 	}
 	var req renameRequest

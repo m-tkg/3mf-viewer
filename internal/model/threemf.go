@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -88,13 +89,26 @@ type modelFile struct {
 
 // Parse3MF は 3MF (zip) を読み、build item ごとにメッシュを平坦化した Model を返す。
 func Parse3MF(filename string) (*Model, error) {
-	zr, err := zip.OpenReader(filename)
+	f, err := os.Open(filename)
 	if err != nil {
 		return nil, fmt.Errorf("3MF: %w", err)
 	}
-	defer zr.Close()
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("3MF: %w", err)
+	}
+	return Parse3MFReader(f, st.Size())
+}
 
-	z := &zipFiles{zr: zr, files: map[string]*zip.File{}}
+// Parse3MFReader は Parse3MF と同じ処理を、メモリ上などの io.ReaderAt (全長 size) に対して行う。
+func Parse3MFReader(r io.ReaderAt, size int64) (*Model, error) {
+	zr, err := zip.NewReader(r, size)
+	if err != nil {
+		return nil, fmt.Errorf("3MF: %w", err)
+	}
+
+	z := &zipFiles{files: map[string]*zip.File{}}
 	for _, f := range zr.File {
 		z.files[strings.ToLower(f.Name)] = f
 	}
@@ -246,7 +260,6 @@ func (f *flattener) flatten(mf *modelFile, id string, t affine, depth int) error
 }
 
 type zipFiles struct {
-	zr    *zip.ReadCloser
 	files map[string]*zip.File // 小文字化した名前 -> エントリ
 }
 

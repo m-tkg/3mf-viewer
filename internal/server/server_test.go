@@ -1,14 +1,18 @@
 package server
 
 import (
+	"archive/zip"
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -495,5 +499,158 @@ func TestModelCacheDropPath(t *testing.T) {
 	}
 	if c.bytes != 10 || len(c.keys) != 1 {
 		t.Errorf("accounting: bytes=%d keys=%v", c.bytes, c.keys)
+	}
+}
+
+// ---------- 解析 API (ブラウザで選んだフォルダ用) ----------
+
+func postParse(t *testing.T, ts *httptest.Server, o rnOpts, name string, body []byte) (int, string) {
+	t.Helper()
+	u := ts.URL + "/api/parse?name=" + url.QueryEscape(name)
+	req, _ := http.NewRequest("POST", u, bytes.NewReader(body))
+	if o.ctype == "" {
+		o.ctype = "application/octet-stream"
+	}
+	req.Header.Set("Content-Type", o.ctype)
+	if o.token != "" {
+		req.Header.Set("X-Viewer-Token", o.token)
+	}
+	if o.origin != "" {
+		req.Header.Set("Origin", o.origin)
+	}
+	if o.site != "" {
+		req.Header.Set("Sec-Fetch-Site", o.site)
+	}
+	if o.host != "" {
+		req.Host = o.host
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	b, _ := io.ReadAll(res.Body)
+	return res.StatusCode, string(b)
+}
+
+func zip3MF(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	add := func(n, c string) {
+		w, _ := zw.Create(n)
+		_, _ = w.Write([]byte(c))
+	}
+	add("_rels/.rels", `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/3dmodel.model" Id="r" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>`)
+	add("3D/3dmodel.model", `<model unit="millimeter"><resources><object id="1" name="A" type="model"><mesh><vertices>
+<vertex x="0" y="0" z="0"/><vertex x="1" y="0" z="0"/><vertex x="0" y="1" z="0"/></vertices>
+<triangles><triangle v1="0" v2="1" v3="2"/></triangles></mesh></object>
+<object id="2" name="B" type="model"><mesh><vertices>
+<vertex x="0" y="0" z="0"/><vertex x="1" y="0" z="0"/><vertex x="0" y="1" z="0"/></vertices>
+<triangles><triangle v1="0" v2="1" v3="2"/></triangles></mesh></object></resources>
+<build><item objectid="1"/><item objectid="2"/></build></model>`)
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestParseAPI(t *testing.T) {
+	ts, root := newTestServer(t)
+	tok := pageToken(t, ts)
+	ok := rnOpts{token: tok, origin: ts.URL, site: "same-origin"}
+
+	code, body := postParse(t, ts, ok, "sub/dir/tri.STL", stlBytes())
+	if code != 200 {
+		t.Fatalf("stl: %d %s", code, body)
+	}
+	var m modelJSON
+	if err := json.Unmarshal([]byte(body), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m.Format != "stl" || len(m.Items) != 1 || m.Items[0].Name != "tri" || m.Items[0].TriangleCount != 1 {
+		t.Fatalf("stl model = %+v", m)
+	}
+
+	code, body = postParse(t, ts, ok, "multi.3mf", zip3MF(t))
+	if code != 200 {
+		t.Fatalf("3mf: %d %s", code, body)
+	}
+	m = modelJSON{}
+	if err := json.Unmarshal([]byte(body), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m.Format != "3mf" || len(m.Items) != 2 || m.Items[0].Name != "A" || m.Items[1].Name != "B" {
+		t.Fatalf("3mf model = %+v", m)
+	}
+
+	// 壊れた中身 / 未対応の拡張子
+	if code, _ := postParse(t, ts, ok, "broken.stl", []byte("solid x\nendsolid x\n")); code != http.StatusUnprocessableEntity {
+		t.Errorf("broken: %d", code)
+	}
+	for _, n := range []string{"a.obj", "", "a.stl/..", "noext"} {
+		if code, _ := postParse(t, ts, ok, n, stlBytes()); code != http.StatusBadRequest {
+			t.Errorf("name %q: %d", n, code)
+		}
+	}
+	// GET は不可
+	if res, _ := get(t, ts, "/api/parse?name=a.stl"); res.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("GET: %d", res.StatusCode)
+	}
+	// ルート配下には何も書かれない
+	ents, _ := os.ReadDir(root)
+	if len(ents) != 2 { // sub, broken.stl のまま
+		t.Errorf("root changed: %v", ents)
+	}
+}
+
+func TestParseAPIRejectsUnauthorized(t *testing.T) {
+	ts, _ := newTestServer(t)
+	tok := pageToken(t, ts)
+	cases := map[string]rnOpts{
+		"no token":     {origin: ts.URL, site: "same-origin"},
+		"bad token":    {token: "x", origin: ts.URL, site: "same-origin"},
+		"no origin":    {token: tok},
+		"cross origin": {token: tok, origin: "http://evil.example", site: "cross-site"},
+		"foreign host": {token: tok, origin: "http://evil.example"},
+		"json type":    {token: tok, origin: ts.URL, site: "same-origin", ctype: "application/json"},
+		"text/plain":   {token: tok, origin: ts.URL, site: "same-origin", ctype: "text/plain"},
+		"form":         {token: tok, origin: ts.URL, site: "same-origin", ctype: "application/x-www-form-urlencoded"},
+		"rebinding":    {token: tok, origin: ts.URL, site: "same-origin", host: "evil.example"},
+	}
+	for name, o := range cases {
+		code, _ := postParse(t, ts, o, "a.stl", stlBytes())
+		if code != http.StatusForbidden && code != http.StatusUnsupportedMediaType {
+			t.Errorf("%s: status %d", name, code)
+		}
+		if code == http.StatusOK {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func TestParseAPISizeLimit(t *testing.T) {
+	old := maxUploadBytes
+	maxUploadBytes = 100
+	t.Cleanup(func() { maxUploadBytes = old })
+	ts, _ := newTestServer(t)
+	ok := rnOpts{token: pageToken(t, ts), origin: ts.URL, site: "same-origin"}
+	if code, _ := postParse(t, ts, ok, "big.stl", make([]byte, 101)); code != http.StatusRequestEntityTooLarge {
+		t.Errorf("over limit: %d", code)
+	}
+	// chunked (Content-Length 不明) でも上限を超えたら拒否
+	req, _ := http.NewRequest("POST", ts.URL+"/api/parse?name=big.stl", io.NopCloser(bytes.NewReader(make([]byte, 500))))
+	req.ContentLength = -1
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("X-Viewer-Token", ok.token)
+	req.Header.Set("Origin", ts.URL)
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("chunked over limit: %d", res.StatusCode)
 	}
 }

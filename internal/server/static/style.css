@@ -177,3 +177,7 @@ button.primary { background: var(--accent-bg); border-color: var(--accent); }
   #app { flex-direction: column; }
   #sidebar { width: 100%; max-height: 40%; border-right: 0; border-bottom: 1px solid var(--line); }
 }
+
+.source-row { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+.local-note { margin-bottom: 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+.local-badge { color: var(--accent); }
