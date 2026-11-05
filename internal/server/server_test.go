@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -264,5 +265,235 @@ func TestModelCacheEviction(t *testing.T) {
 	}
 	if _, ok := c.get("d"); !ok {
 		t.Error("d should be cached")
+	}
+}
+
+// ---------- 名前変更 API ----------
+
+var tokenRe = regexp.MustCompile(`<meta name="viewer-token" content="([0-9a-f]+)">`)
+
+func pageToken(t *testing.T, ts *httptest.Server) string {
+	t.Helper()
+	_, body := get(t, ts, "/")
+	m := tokenRe.FindStringSubmatch(body)
+	if m == nil {
+		t.Fatal("token not embedded in index page")
+	}
+	return m[1]
+}
+
+type rnOpts struct {
+	token, origin, site, ctype string
+	host                       string
+}
+
+func postRename(t *testing.T, ts *httptest.Server, o rnOpts, path, name string) (int, string) {
+	t.Helper()
+	b, _ := json.Marshal(map[string]string{"path": path, "name": name})
+	req, _ := http.NewRequest("POST", ts.URL+"/api/rename", strings.NewReader(string(b)))
+	if o.ctype == "" {
+		o.ctype = "application/json"
+	}
+	req.Header.Set("Content-Type", o.ctype)
+	if o.token != "" {
+		req.Header.Set("X-Viewer-Token", o.token)
+	}
+	if o.origin != "" {
+		req.Header.Set("Origin", o.origin)
+	}
+	if o.site != "" {
+		req.Header.Set("Sec-Fetch-Site", o.site)
+	}
+	if o.host != "" {
+		req.Host = o.host
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var sb strings.Builder
+	buf := make([]byte, 4096)
+	for {
+		n, err := res.Body.Read(buf)
+		sb.Write(buf[:n])
+		if err != nil {
+			break
+		}
+	}
+	return res.StatusCode, sb.String()
+}
+
+func TestRenameAPI(t *testing.T) {
+	ts, root := newTestServer(t)
+	tok := pageToken(t, ts)
+	ok := rnOpts{token: tok, origin: ts.URL, site: "same-origin"}
+
+	// トークンは index.html にだけ埋め込まれ、他では露出しない。
+	if _, b := get(t, ts, "/api/info"); strings.Contains(b, tok) {
+		t.Error("token leaked in /api/info")
+	}
+	if _, b := get(t, ts, "/app.js"); strings.Contains(b, tok) {
+		t.Error("token leaked in app.js")
+	}
+
+	// 正常系
+	code, body := postRename(t, ts, ok, "sub/tri.stl", "renamed")
+	if code != 200 || !strings.Contains(body, `"sub/renamed.stl"`) {
+		t.Fatalf("rename: %d %s", code, body)
+	}
+	if _, err := os.Stat(filepath.Join(root, "sub", "renamed.stl")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "sub", "tri.stl")); !os.IsNotExist(err) {
+		t.Fatal("old file remains")
+	}
+	// 新しい名前でモデル取得でき、古い名前は 404。
+	if res, _ := get(t, ts, "/api/model?path=sub/renamed.stl"); res.StatusCode != 200 {
+		t.Errorf("model after rename: %d", res.StatusCode)
+	}
+	if res, _ := get(t, ts, "/api/model?path=sub/tri.stl"); res.StatusCode != 404 {
+		t.Errorf("old name model: %d", res.StatusCode)
+	}
+
+	// 上書き拒否 (409) で両方残る。
+	if err := os.WriteFile(filepath.Join(root, "sub", "taken.stl"), []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, _ = postRename(t, ts, ok, "sub/renamed.stl", "taken")
+	if code != 409 {
+		t.Errorf("overwrite: %d", code)
+	}
+	if b, _ := os.ReadFile(filepath.Join(root, "sub", "taken.stl")); string(b) != "keep" {
+		t.Fatal("destination overwritten")
+	}
+	if _, err := os.Stat(filepath.Join(root, "sub", "renamed.stl")); err != nil {
+		t.Fatal(err)
+	}
+
+	// 配下外・不正名
+	secret := filepath.Join(filepath.Dir(root), "secret.stl")
+	for _, p := range []string{"../secret.stl", "sub/../../secret.stl", "/etc/passwd", ""} {
+		if code, _ := postRename(t, ts, ok, p, "x"); code != 403 {
+			t.Errorf("path %q: %d", p, code)
+		}
+	}
+	if _, err := os.Stat(secret); err != nil {
+		t.Fatal("outside file touched")
+	}
+	if code, _ := postRename(t, ts, ok, "nope.stl", "x"); code != 404 {
+		t.Errorf("missing: %d", code)
+	}
+	for _, n := range []string{"", "a/b", "..", ".x", "a\x00", "../secret"} {
+		if code, _ := postRename(t, ts, ok, "broken.stl", n); code != 400 {
+			t.Errorf("name %q: %d", n, code)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "broken.stl")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRenameAPIRejectsUnauthorized(t *testing.T) {
+	ts, root := newTestServer(t)
+	tok := pageToken(t, ts)
+	cases := []struct {
+		name string
+		o    rnOpts
+		want int
+	}{
+		{"no token", rnOpts{origin: ts.URL, site: "same-origin"}, 403},
+		{"wrong token", rnOpts{token: strings.Repeat("0", len(tok)), origin: ts.URL, site: "same-origin"}, 403},
+		{"no origin and no fetch-site", rnOpts{token: tok}, 403},
+		{"foreign origin", rnOpts{token: tok, origin: "http://evil.example.com", site: "same-origin"}, 403},
+		{"foreign origin only", rnOpts{token: tok, origin: "http://evil.example.com"}, 403},
+		{"cross-site", rnOpts{token: tok, origin: ts.URL, site: "cross-site"}, 403},
+		{"same-site", rnOpts{token: tok, site: "same-site"}, 403},
+		{"null origin", rnOpts{token: tok, origin: "null"}, 403},
+		{"foreign host", rnOpts{token: tok, origin: "http://evil.example.com", site: "same-origin", host: "evil.example.com"}, 403},
+		{"form content-type", rnOpts{token: tok, origin: ts.URL, site: "same-origin", ctype: "application/x-www-form-urlencoded"}, 415},
+	}
+	for _, c := range cases {
+		if code, _ := postRename(t, ts, c.o, "broken.stl", "hacked"); code != c.want {
+			t.Errorf("%s: status %d want %d", c.name, code, c.want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "broken.stl")); err != nil {
+		t.Fatal("file was renamed by an unauthorized request")
+	}
+
+	// GET / PUT / DELETE は不可。他の API への POST も不可。
+	if res, _ := get(t, ts, "/api/rename"); res.StatusCode != 405 {
+		t.Errorf("GET rename: %d", res.StatusCode)
+	}
+	for _, m := range []string{"PUT", "DELETE", "PATCH"} {
+		req, _ := http.NewRequest(m, ts.URL+"/api/rename", strings.NewReader("{}"))
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if res.StatusCode != 405 {
+			t.Errorf("%s rename: %d", m, res.StatusCode)
+		}
+	}
+}
+
+func TestRenameEventsAndCache(t *testing.T) {
+	ts, _ := newTestServer(t)
+	tok := pageToken(t, ts)
+	// 改名前にモデルをキャッシュさせる。
+	if res, _ := get(t, ts, "/api/model?path=sub/tri.stl"); res.StatusCode != 200 {
+		t.Fatal(res.StatusCode)
+	}
+	res, err := http.Get(ts.URL + "/api/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	lines := make(chan string, 64)
+	go func() {
+		sc := bufio.NewScanner(res.Body)
+		for sc.Scan() {
+			lines <- sc.Text()
+		}
+	}()
+	if code, b := postRename(t, ts, rnOpts{token: tok, origin: ts.URL, site: "same-origin"}, "sub/tri.stl", "moved"); code != 200 {
+		t.Fatalf("%d %s", code, b)
+	}
+	timeout := time.After(3 * time.Second)
+	for {
+		select {
+		case l := <-lines:
+			if !strings.HasPrefix(l, "data: ") {
+				continue
+			}
+			var c scan.Change
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(l, "data: ")), &c); err != nil {
+				t.Fatal(err)
+			}
+			if len(c.Added) != 1 || c.Added[0] != "sub/moved.stl" || len(c.Removed) != 1 || c.Removed[0] != "sub/tri.stl" {
+				t.Fatalf("change: %+v", c)
+			}
+			return
+		case <-timeout:
+			t.Fatal("no SSE event after rename")
+		}
+	}
+}
+
+func TestModelCacheDropPath(t *testing.T) {
+	c := newModelCache(10, 1000)
+	c.put("/a/x.stl|1|2", make([]byte, 10))
+	c.put("/a/x.stl.bak|1|2", make([]byte, 10))
+	c.dropPath("/a/x.stl")
+	if _, ok := c.get("/a/x.stl|1|2"); ok {
+		t.Error("not dropped")
+	}
+	if _, ok := c.get("/a/x.stl.bak|1|2"); !ok {
+		t.Error("unrelated entry dropped")
+	}
+	if c.bytes != 10 || len(c.keys) != 1 {
+		t.Errorf("accounting: bytes=%d keys=%v", c.bytes, c.keys)
 	}
 }

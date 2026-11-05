@@ -68,6 +68,24 @@ async function getJSON(url) {
   return body;
 }
 
+const viewerToken = () => {
+  const m = document.querySelector('meta[name="viewer-token"]');
+  return m ? m.content : '';
+};
+
+async function postJSON(url, data) {
+  const res = await fetch(url, {
+    method: 'POST',
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json', 'X-Viewer-Token': viewerToken() },
+    body: JSON.stringify(data),
+  });
+  let body = null;
+  try { body = await res.json(); } catch (e) { /* ignore */ }
+  if (!res.ok) throw new Error((body && body.error) || `HTTP ${res.status}`);
+  return body;
+}
+
 function b64ToBuffer(b64) {
   const bin = atob(b64);
   const buf = new ArrayBuffer(bin.length);
@@ -381,7 +399,19 @@ const thumbs = (() => {
     try { localStorage.removeItem(lsKeyOf(path)); } catch (e) { /* 無視 */ }
   }
 
-  return { observe: (el) => io.observe(el), forget };
+  // 改名時は、サイズ・更新時刻が変わらないので、キャッシュを新しいパスへ引き継ぐ。
+  function move(from, to) {
+    const e = mem.get(from);
+    mem.delete(from);
+    if (e) mem.set(to, e);
+    try {
+      const raw = localStorage.getItem(lsKeyOf(from));
+      localStorage.removeItem(lsKeyOf(from));
+      if (raw) localStorage.setItem(lsKeyOf(to), raw);
+    } catch (e2) { /* 無視 */ }
+  }
+
+  return { observe: (el) => io.observe(el), forget, move };
 })();
 
 // ---------- 一覧 ----------
@@ -436,7 +466,12 @@ function renderList() {
     cp.textContent = 'パス';
     cp.title = '絶対パスをコピー';
     cp.addEventListener('click', (e) => { e.stopPropagation(); copyText(f.absPath, 'パス'); });
-    meta.append(badge, size, sp, cn, cp);
+    const rn = document.createElement('button');
+    rn.type = 'button';
+    rn.textContent = '改名';
+    rn.title = 'ファイル名を変更';
+    rn.addEventListener('click', (e) => { e.stopPropagation(); openRename(f); });
+    meta.append(badge, size, sp, rn, cn, cp);
     body.append(name, dir, meta);
     li.append(th, body);
     li.addEventListener('click', () => select(f.path));
@@ -445,6 +480,9 @@ function renderList() {
   }
 }
 
+// 過去に見たファイル情報 (path -> file)。SSE の removed/added から「改名」を判別するために使う。
+const lastSeen = new Map();
+
 async function refreshFiles() {
   try {
     state.files = await getJSON('/api/files');
@@ -452,7 +490,38 @@ async function refreshFiles() {
     toast(`一覧の取得に失敗: ${e.message}`);
     return;
   }
+  for (const f of state.files) lastSeen.set(f.path, f);
   renderList();
+}
+
+// SSE の差分のうち、removed と added が同一ファイル (同じフォルダ・種別・サイズ・更新時刻) の
+// 対になっているものを改名とみなし、旧パス -> 新パスの Map を返す。
+function detectRenames(c) {
+  const out = new Map();
+  const used = new Set();
+  for (const p of c.removed) {
+    const o = lastSeen.get(p);
+    if (!o) continue;
+    const q = c.added.find((a) => {
+      if (used.has(a)) return false;
+      const n = state.files.find((f) => f.path === a);
+      return n && n.dir === o.dir && n.kind === o.kind && n.size === o.size && n.modTime === o.modTime;
+    });
+    if (q) {
+      used.add(q);
+      out.set(p, q);
+    }
+  }
+  return out;
+}
+
+// 選択中のファイルが改名されたとき、モデルは再取得せず、選択・ハッシュ・表示だけを新しいパスへ移す。
+function followRename(from, to) {
+  if (state.selected !== from) return;
+  state.selected = to;
+  history.replaceState(null, '', `#${encodeURIComponent(to)}`);
+  for (const li of document.querySelectorAll('.file')) li.classList.toggle('selected', li.dataset.path === to);
+  updateHeader();
 }
 
 // ---------- 選択・プレビュー ----------
@@ -472,6 +541,7 @@ function updateHeader() {
   const f = currentFile();
   $('title').textContent = f ? f.name : (state.selected || 'ファイルを選択');
   $('subtitle').textContent = f ? f.absPath : '';
+  $('rename').disabled = !f;
   $('copy-name').disabled = !f;
   $('copy-path').disabled = !f;
 }
@@ -577,6 +647,60 @@ function showItems({ keepCamera }) {
   $('status').textContent = `${model.format.toUpperCase()} · 三角形 ${tris.toLocaleString()} · 寸法 ${dim} (モデル単位, 3MF は mm) · 左ドラッグ: 回転 / ホイール: ズーム / 右ドラッグ: パン`;
 }
 
+// ---------- 名前の変更 ----------
+
+const renameDlg = {
+  dlg: $('rename-dialog'),
+  input: $('rename-input'),
+  err: $('rename-error'),
+  file: null,
+  busy: false,
+};
+
+function splitExt(name) {
+  const i = name.lastIndexOf('.');
+  return i > 0 ? [name.slice(0, i), name.slice(i)] : [name, ''];
+}
+
+function openRename(f) {
+  const [base, ext] = splitExt(f.name);
+  renameDlg.file = f;
+  renameDlg.err.textContent = '';
+  $('rename-dir').textContent = f.dir ? `フォルダ: ${f.dir}` : 'フォルダ: (ルート直下)';
+  $('rename-ext').textContent = ext;
+  renameDlg.input.value = base;
+  if (!renameDlg.dlg.open) renameDlg.dlg.showModal();
+  renameDlg.input.focus();
+  renameDlg.input.select();
+}
+
+async function submitRename(ev) {
+  ev.preventDefault();
+  const f = renameDlg.file;
+  if (!f || renameDlg.busy) return;
+  const name = renameDlg.input.value;
+  renameDlg.busy = true;
+  $('rename-ok').disabled = true;
+  try {
+    const res = await postJSON('/api/rename', { path: f.path, name });
+    renameDlg.dlg.close();
+    thumbs.move(f.path, res.path);
+    toast(`名前を変更した: ${res.path.split('/').pop()}`);
+    await refreshFiles();
+    followRename(f.path, res.path); // 直後の SSE (removed/added) は改名として判別され、再読み込みしない
+  } catch (e) {
+    renameDlg.err.textContent = e.message;
+    renameDlg.input.focus();
+  } finally {
+    renameDlg.busy = false;
+    $('rename-ok').disabled = false;
+  }
+}
+
+$('rename-form').addEventListener('submit', submitRename);
+$('rename-cancel').addEventListener('click', () => renameDlg.dlg.close());
+$('rename').addEventListener('click', () => { const f = currentFile(); if (f) openRename(f); });
+
 // ---------- 変更監視 (SSE) ----------
 
 function connectEvents() {
@@ -584,9 +708,22 @@ function connectEvents() {
   es.addEventListener('change', async (ev) => {
     let c;
     try { c = JSON.parse(ev.data); } catch (e) { return; }
-    for (const p of [...c.modified, ...c.removed]) thumbs.forget(p);
     await refreshFiles();
+    const renames = detectRenames(c);
+    const renamedTo = new Set(renames.values());
+    for (const p of c.modified) thumbs.forget(p);
+    for (const p of c.removed) {
+      const to = renames.get(p);
+      if (to) {
+        thumbs.move(p, to);
+        followRename(p, to);
+      } else {
+        thumbs.forget(p);
+      }
+      lastSeen.delete(p);
+    }
     if (!state.selected) return;
+    if (renamedTo.has(state.selected)) return; // 改名のみ: 内容は同じなので再読み込みしない
     if (c.removed.includes(state.selected) || c.added.includes(state.selected)) {
       loadModel({ keepCamera: false });
     } else if (c.modified.includes(state.selected)) {
