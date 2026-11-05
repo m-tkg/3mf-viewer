@@ -1,2 +1,94 @@
 # 3mf-viewer
-CLI で起動し、ブラウザで 3MF / STL ファイルをプレビューするローカルビューア
+
+CLI で起動し、指定したパス配下の 3MF / STL ファイルをブラウザで 3D プレビューするローカルビューア。
+Go 製の単一バイナリで動作する (フロントエンドの three.js は `embed` でバイナリに埋め込み済みで、外部ネットワークは不要)。
+
+## インストール
+
+```sh
+go install github.com/m-tkg/3mf-viewer@latest
+```
+
+ソースからビルドする場合:
+
+```sh
+git clone https://github.com/m-tkg/3mf-viewer.git
+cd 3mf-viewer
+go build -o 3mf-viewer .
+```
+
+Go 1.22 以降が必要。
+
+## 使い方
+
+```sh
+3mf-viewer <path>
+```
+
+`<path>` にはディレクトリ (サブディレクトリも再帰的に探索) か、単一の `.3mf` / `.stl` ファイルを指定する。
+起動するとローカル HTTP サーバが立ち、ブラウザが自動で開く。**CLI が動いている間だけ**閲覧できる (終了は Ctrl+C)。
+
+```sh
+3mf-viewer ~/Downloads/3dModels            # ディレクトリ配下を一覧表示
+3mf-viewer ./part.3mf                       # 単一ファイル
+3mf-viewer ~/models --port 8080 --no-open   # ポート指定・ブラウザを開かない
+```
+
+### オプション
+
+| オプション | 既定値 | 説明 |
+| --- | --- | --- |
+| `--port N` | `3977` | 待ち受けポート。未指定でポートが使用中のときは空きポートに自動で切り替える。明示指定したポートが使用中ならエラー終了する |
+| `--host ADDR` | `127.0.0.1` | 待ち受けアドレス。既定ではローカルからのみ接続できる |
+| `--no-open` | off | 起動時にブラウザを自動で開かない |
+| `--interval D` | `1s` | ファイル変更の監視間隔 |
+| `--version` | | バージョンを表示して終了 |
+
+フラグは `<path>` の前後どちらにも置ける。
+
+## 機能
+
+- 指定パス配下の `.3mf` / `.stl` (拡張子の大文字小文字は問わない) を一覧表示。隠しファイル / 隠しディレクトリ (`.` 始まり) は除外
+- 一覧のサムネイル。ブラウザ側で three.js を使って描画し、`localStorage` にキャッシュする (ファイルのサイズ・更新時刻が変わると再生成)。16 MB を超えるファイルはサムネイルを省略する
+- 3D プレビュー: 左ドラッグで回転、ホイールでズーム、右ドラッグでパン。グリッド / ワイヤー表示の切り替え、視点リセット
+- 3MF に複数のモデル (build item) がある場合は、「全体」と各モデルを個別に切り替えて表示できる。`components` や変換行列、単位 (`unit`)、production 拡張の外部モデルファイル (`p:path`) にも対応する。Bambu Studio / OrcaSlicer のオブジェクト名 (`Metadata/model_settings.config`) も表示名に使う
+- 一覧とプレビュー画面から、ファイル名と絶対パスをクリップボードにコピーできる
+- ファイルの追加・変更・削除を監視 (ポーリング + Server-Sent Events) し、一覧とプレビューを自動で更新する
+- Z 軸を上とした座標系で表示する (3D プリンタ用データの一般的な向き)
+
+## セキュリティ
+
+- 既定では `127.0.0.1` のみで待ち受ける。`--host 0.0.0.0` などを指定すると、同じネットワークの他のホストから指定パス配下のモデルが閲覧できるようになる (起動時に警告を表示する)
+- 配信するのは指定パス配下の `.3mf` / `.stl` のみ。`..` を含むパス、隠しファイル、指定パスの外を指すシンボリックリンクは拒否する
+- ループバックで待ち受けている間は `Host` ヘッダがループバックのものだけを受け付ける (DNS rebinding 対策)
+- API は GET のみ。CSP などのセキュリティヘッダを付与する
+
+## 開発
+
+```sh
+go test ./...
+go vet ./...
+```
+
+構成:
+
+- `main.go`: CLI (フラグ解析、ポート選択、ブラウザ起動)
+- `internal/scan`: ファイル探索、配信可能パスの検証、変更の差分検出
+- `internal/model`: 3MF / STL パーサ (三角形メッシュへの変換)
+- `internal/server`: HTTP API、SSE、埋め込み静的ファイル (`static/`)
+
+HTTP API:
+
+- `GET /api/files`: モデルファイル一覧
+- `GET /api/model?path=<相対パス>`: パース済みモデル (頂点・インデックスは base64 の little endian バイナリ)
+- `GET /api/events`: ファイル変更通知 (SSE)
+- `GET /api/info`: ルートパスとバージョン
+
+### 同梱ライブラリ
+
+`internal/server/static/vendor/` に [three.js](https://threejs.org/) r170 (MIT, `LICENSE-three.txt`) を同梱している。
+`OrbitControls.js` は import 指定を `'three'` から `'./three.module.js'` に書き換えている (import map を使わずに CSP を厳格に保つため)。
+
+## ライセンス
+
+本体のライセンスは未設定。同梱の three.js は MIT (`internal/server/static/vendor/LICENSE-three.txt`)。
