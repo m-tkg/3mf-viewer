@@ -14,6 +14,12 @@
     <header class="side-head">
       <h1>3mf-viewer</h1>
       <div id="root-path" class="muted" title=""></div>
+      <div class="source-row">
+        <button id="open-folder" type="button" title="ブラウザでフォルダを選んで読み込む (サーバには保存されない)">フォルダを開く</button>
+        <button id="back-server" type="button" hidden>起動時のフォルダに戻る</button>
+        <input id="folder-input" type="file" webkitdirectory multiple hidden>
+      </div>
+      <div id="local-note" class="muted local-note" hidden></div>
       <input id="filter" type="search" placeholder="ファイルを絞り込み" autocomplete="off">
       <div id="count" class="muted"></div>
     </header>

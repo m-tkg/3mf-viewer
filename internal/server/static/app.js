@@ -1,5 +1,6 @@
 import * as THREE from './lib/three.module.js';
 import { OrbitControls } from './lib/OrbitControls.js';
+import { buildLocalList, sizeNotice } from './local.js';
 
 const $ = (id) => document.getElementById(id);
 const PALETTE = [0x6aa9ff, 0xffb454, 0x7ee787, 0xff7b72, 0xd2a8ff, 0x56d4dd, 0xf2cc60, 0xff9bce];
@@ -11,7 +12,13 @@ const state = {
   item: 'all', // 'all' | item index
   loadSeq: 0,
   loading: 0, // 進行中のプレビュー読み込み数
+  // 'server': 起動時のフォルダ (サーバが読む) / 'local': ブラウザで選んだフォルダ (中身を解析用に送る)
+  source: 'server',
+  localRoot: '', // local のときに選んだフォルダ名
+  gen: 0, // 一覧の世代。source 切替・フォルダ再選択で増やし、古い非同期結果を捨てる
 };
+const isLocal = () => state.source === 'local';
+const LOCAL_REASON = 'ブラウザで読み込んだフォルダでは使えない (絶対パスが取れず、サーバ側のファイルとして扱えないため)';
 
 // ---------- ユーティリティ ----------
 
@@ -72,6 +79,24 @@ const viewerToken = () => {
   const m = document.querySelector('meta[name="viewer-token"]');
   return m ? m.content : '';
 };
+
+// ブラウザで選んだファイルの中身を送り、サーバの既存パーサで解析した結果だけを受け取る (サーバには保存されない)。
+async function parseLocal(f) {
+  const res = await fetch(`/api/parse?name=${encodeURIComponent(f.name)}`, {
+    method: 'POST',
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/octet-stream', 'X-Viewer-Token': viewerToken() },
+    body: f.file,
+  });
+  let body = null;
+  try { body = await res.json(); } catch (e) { /* ignore */ }
+  if (!res.ok) throw new Error((body && body.error) || `HTTP ${res.status}`);
+  return body;
+}
+
+function fetchModel(f) {
+  return isLocal() ? parseLocal(f) : getJSON(`/api/model?path=${encodeURIComponent(f.path)}`);
+}
 
 async function postJSON(url, data) {
   const res = await fetch(url, {
@@ -253,10 +278,14 @@ const thumbs = (() => {
   const MAX_THUMB_TRIANGLES = 1_500_000;
   const BIG_MARK = 'big'; // localStorage 上で「巨大のため省略」を表す値
   const sigOf = (f) => `${f.size}:${f.modTime}`;
-  const lsKeyOf = (path) => `3mfv:thumb:${path}`;
+  // ブラウザで選んだフォルダのファイルは、サーバ側の同名パスや、別のフォルダ (同名でも) と混ざらないよう、
+  // フォルダを開くたびに変わる世代 (state.gen) 付きの名前空間にし、localStorage には保存しない。
+  const keyOf = (path) => (isLocal() ? `local:${state.gen}:${path}` : path);
+  const lsKeyOf = (path) => `3mfv:thumb:${keyOf(path)}`;
   const lsKey = (f) => lsKeyOf(f.path);
 
   function lsGet(f) {
+    if (isLocal()) return null;
     try {
       const raw = localStorage.getItem(lsKey(f));
       if (!raw) return null;
@@ -266,6 +295,7 @@ const thumbs = (() => {
     } catch (e) { return null; }
   }
   function lsSet(f, url) {
+    if (isLocal()) return;
     const val = `${sigOf(f)}|${url}`;
     try {
       localStorage.setItem(lsKey(f), val);
@@ -313,7 +343,7 @@ const thumbs = (() => {
   }
 
   function apply(f, el) {
-    const e = mem.get(f.path);
+    const e = mem.get(keyOf(f.path));
     if (!e || e.sig !== sigOf(f)) return false;
     if (e.url) {
       el.style.backgroundImage = `url("${e.url}")`;
@@ -332,12 +362,15 @@ const thumbs = (() => {
       while (state.loading > 0) await new Promise((r) => setTimeout(r, 200));
       const f = queue.shift();
       queued.delete(f.path);
+      const gen = state.gen;
       const cur = state.files.find((x) => x.path === f.path);
       if (!cur) continue;
+      const key = keyOf(cur.path);
       let url = null;
       let big = false;
       try {
-        const model = await getJSON(`/api/model?path=${encodeURIComponent(cur.path)}`);
+        const model = await fetchModel(cur);
+        if (gen !== state.gen) continue; // 取得中にフォルダが切り替わった
         // 3MF は圧縮されているため、ファイルサイズが小さくても展開後は巨大なことがある。
         const tris = model.items.reduce((n, it) => n + it.triangleCount, 0);
         if (tris > MAX_THUMB_TRIANGLES) {
@@ -347,8 +380,8 @@ const thumbs = (() => {
           url = renderModel(model);
           lsSet(cur, url);
         }
-      } catch (e) { /* サムネ失敗は「表示不可」とする */ }
-      mem.set(cur.path, { sig: sigOf(cur), url, big });
+      } catch (e) { if (gen !== state.gen) continue; /* サムネ失敗は「表示不可」とする */ }
+      mem.set(key, { sig: sigOf(cur), url, big });
       for (const el of document.querySelectorAll('.thumb')) {
         if (el.dataset.path === cur.path) apply(cur, el);
       }
@@ -371,18 +404,18 @@ const thumbs = (() => {
   function request(f, el) {
     if (apply(f, el)) return;
     if (f.size > MAX_THUMB_BYTES) {
-      mem.set(f.path, { sig: sigOf(f), url: null, big: true });
+      mem.set(keyOf(f.path), { sig: sigOf(f), url: null, big: true });
       apply(f, el);
       return;
     }
     const cached = lsGet(f);
     if (cached === BIG_MARK) {
-      mem.set(f.path, { sig: sigOf(f), url: null, big: true });
+      mem.set(keyOf(f.path), { sig: sigOf(f), url: null, big: true });
       apply(f, el);
       return;
     }
     if (cached) {
-      mem.set(f.path, { sig: sigOf(f), url: cached });
+      mem.set(keyOf(f.path), { sig: sigOf(f), url: cached });
       apply(f, el);
       return;
     }
@@ -395,15 +428,15 @@ const thumbs = (() => {
   // ファイルが変更・削除されたら、メモリと localStorage の両方のキャッシュを捨てる。
   // (サイズ・更新時刻が過去の値に戻ったときに古いサムネイルが復活しないようにする)
   function forget(path) {
-    mem.delete(path);
+    mem.delete(keyOf(path));
     try { localStorage.removeItem(lsKeyOf(path)); } catch (e) { /* 無視 */ }
   }
 
   // 改名時は、サイズ・更新時刻が変わらないので、キャッシュを新しいパスへ引き継ぐ。
   function move(from, to) {
-    const e = mem.get(from);
-    mem.delete(from);
-    if (e) mem.set(to, e);
+    const e = mem.get(keyOf(from));
+    mem.delete(keyOf(from));
+    if (e) mem.set(keyOf(to), e);
     try {
       const raw = localStorage.getItem(lsKeyOf(from));
       localStorage.removeItem(lsKeyOf(from));
@@ -411,7 +444,14 @@ const thumbs = (() => {
     } catch (e2) { /* 無視 */ }
   }
 
-  return { observe: (el) => io.observe(el), forget, move };
+  // 一覧を差し替えるとき、待機中の生成を捨てる (進行中の 1 件は gen の不一致で結果が捨てられる)。
+  function reset() {
+    queue.length = 0;
+    queued.clear();
+    for (const k of [...mem.keys()]) if (k.startsWith('local:')) mem.delete(k); // 前のフォルダ分の Data URL を捨てる
+  }
+
+  return { observe: (el) => io.observe(el), forget, move, reset };
 })();
 
 // ---------- 一覧 ----------
@@ -431,7 +471,7 @@ function renderList() {
     const li = document.createElement('li');
     li.className = 'file' + (f.path === state.selected ? ' selected' : '');
     li.dataset.path = f.path;
-    li.title = f.absPath;
+    li.title = isLocal() ? f.path : f.absPath;
 
     const th = document.createElement('div');
     th.className = 'thumb';
@@ -463,13 +503,14 @@ function renderList() {
     cn.addEventListener('click', (e) => { e.stopPropagation(); copyText(f.name, 'ファイル名'); });
     const cp = document.createElement('button');
     cp.type = 'button';
-    cp.textContent = 'パス';
-    cp.title = '絶対パスをコピー';
-    cp.addEventListener('click', (e) => { e.stopPropagation(); copyText(f.absPath, 'パス'); });
+    cp.textContent = isLocal() ? '相対' : 'パス';
+    cp.title = isLocal() ? '選んだフォルダからの相対パスをコピー (絶対パスではない)' : '絶対パスをコピー';
+    cp.addEventListener('click', (e) => { e.stopPropagation(); copyText(...pathCopy(f)); });
     const rn = document.createElement('button');
     rn.type = 'button';
     rn.textContent = '改名';
-    rn.title = 'ファイル名を変更';
+    rn.title = isLocal() ? `名前の変更は使えない: ${LOCAL_REASON}` : 'ファイル名を変更';
+    rn.disabled = isLocal();
     rn.addEventListener('click', (e) => { e.stopPropagation(); openRename(f); });
     meta.append(badge, size, sp, rn, cn, cp);
     body.append(name, dir, meta);
@@ -480,10 +521,16 @@ function renderList() {
   }
 }
 
+// コピーするパス文字列とラベル。ブラウザ読み込み時は絶対パスが無いので、選んだフォルダからの相対パスにする。
+function pathCopy(f) {
+  return isLocal() ? [f.path, '相対パス'] : [f.absPath, 'パス'];
+}
+
 // 過去に見たファイル情報 (path -> file)。SSE の removed/added から「改名」を判別するために使う。
 const lastSeen = new Map();
 
 async function refreshFiles() {
+  if (isLocal()) return; // ブラウザで選んだフォルダは自動更新しない
   try {
     state.files = await getJSON('/api/files');
   } catch (e) {
@@ -540,17 +587,20 @@ function setMessage(text, isError) {
 function updateHeader() {
   const f = currentFile();
   $('title').textContent = f ? f.name : (state.selected || 'ファイルを選択');
-  $('subtitle').textContent = f ? f.absPath : '';
-  $('rename').disabled = !f;
+  $('subtitle').textContent = f ? (isLocal() ? `${state.localRoot}/ からの相対パス: ${f.path}` : f.absPath) : '';
+  $('rename').disabled = !f || isLocal();
+  $('rename').title = isLocal() ? `名前の変更は使えない: ${LOCAL_REASON}` : '';
   $('copy-name').disabled = !f;
   $('copy-path').disabled = !f;
+  $('copy-path').textContent = isLocal() ? '相対パスをコピー' : 'パスをコピー';
+  $('copy-path').title = isLocal() ? '選んだフォルダからの相対パス (絶対パスではない)' : '';
 }
 
 function select(path) {
   state.selected = path;
   state.item = 'all';
   state.model = null;
-  location.hash = encodeURIComponent(path);
+  if (!isLocal()) location.hash = encodeURIComponent(path);
   for (const li of document.querySelectorAll('.file')) li.classList.toggle('selected', li.dataset.path === path);
   loadModel({ keepCamera: false });
 }
@@ -577,10 +627,19 @@ async function loadModelInner({ keepCamera }) {
     return;
   }
   const seq = ++state.loadSeq;
-  if (!keepCamera) setMessage('読み込み中…');
+  const notice = isLocal() ? sizeNotice(f.size) : null;
+  if (notice && notice.block) {
+    viewer.clear();
+    viewer.requestRender();
+    $('items').hidden = true;
+    $('toolbar').hidden = true;
+    setMessage(notice.text, true);
+    return;
+  }
+  if (!keepCamera) setMessage(notice ? notice.text : '読み込み中…');
   let model;
   try {
-    model = await getJSON(`/api/model?path=${encodeURIComponent(f.path)}`);
+    model = await fetchModel(f);
   } catch (e) {
     if (seq !== state.loadSeq) return;
     viewer.clear();
@@ -663,6 +722,7 @@ function splitExt(name) {
 }
 
 function openRename(f) {
+  if (isLocal()) return;
   const [base, ext] = splitExt(f.name);
   renameDlg.file = f;
   renameDlg.err.textContent = '';
@@ -708,6 +768,7 @@ function connectEvents() {
   es.addEventListener('change', async (ev) => {
     let c;
     try { c = JSON.parse(ev.data); } catch (e) { return; }
+    if (isLocal()) return; // サーバ側フォルダの変更通知。ブラウザ読み込み中は表示に影響しない
     await refreshFiles();
     const renames = detectRenames(c);
     const renamedTo = new Set(renames.values());
@@ -730,8 +791,80 @@ function connectEvents() {
       loadModel({ keepCamera: true });
     }
   });
-  es.onopen = () => refreshFiles(); // 再接続時に取りこぼしを補う
+  es.onopen = () => { if (!isLocal()) refreshFiles(); }; // 再接続時に取りこぼしを補う
 }
+
+// ---------- フォルダの読み込み (ブラウザ) ----------
+
+function resetSelection() {
+  state.gen++;
+  state.loadSeq++;
+  state.selected = null;
+  state.model = null;
+  state.item = 'all';
+  thumbs.reset();
+  viewer.clear();
+  viewer.requestRender();
+  $('items').hidden = true;
+  $('toolbar').hidden = true;
+  setMessage('左の一覧からモデルを選択してください');
+  $('status').textContent = '';
+}
+
+function updateSourceUI(info) {
+  const local = isLocal();
+  $('open-folder').textContent = local ? '別のフォルダを開く' : 'フォルダを開く';
+  $('back-server').hidden = !local;
+  const rp = $('root-path');
+  if (local) {
+    rp.textContent = `📁 ${state.localRoot} (ブラウザで読み込み)`;
+    rp.title = `ブラウザで選んだフォルダ「${state.localRoot}」。絶対パスは不明で、一覧のパスは選んだフォルダからの相対パス`;
+  } else {
+    rp.textContent = info || rp.dataset.server || '';
+    rp.title = rp.textContent;
+  }
+  if (!local) $('local-note').hidden = true;
+}
+
+function openFolderPicked(fileList) {
+  const r = buildLocalList(Array.from(fileList));
+  if (!r.rootName && r.files.length === 0) {
+    toast('フォルダが選ばれなかった、または空だった');
+    return;
+  }
+  resetSelection();
+  state.source = 'local';
+  state.localRoot = r.rootName || '(選択したフォルダ)';
+  state.files = r.files;
+  history.replaceState(null, '', location.pathname + location.search);
+  updateSourceUI();
+  const notes = ['名前の変更・ファイル監視による自動反映は使えない (更新するには、もう一度フォルダを開く)。'];
+  if (r.hiddenSkipped) notes.push(`隠しファイル ${r.hiddenSkipped} 件は除外した。`);
+  if (r.truncated) notes.push('ファイルが多いため一覧は先頭の一部のみ表示している。');
+  if (r.files.length === 0) notes.unshift('.3mf / .stl が見つからなかった。');
+  $('local-note').textContent = notes.join(' ');
+  $('local-note').hidden = false;
+  updateHeader();
+  renderList();
+}
+
+async function backToServer() {
+  resetSelection();
+  state.source = 'server';
+  state.localRoot = '';
+  state.files = [];
+  updateSourceUI();
+  updateHeader();
+  await refreshFiles();
+}
+
+$('open-folder').addEventListener('click', () => $('folder-input').click());
+$('folder-input').addEventListener('change', (e) => {
+  const list = e.target.files;
+  if (list && list.length) openFolderPicked(list);
+  e.target.value = ''; // 同じフォルダを続けて選んでも change が発火するように
+});
+$('back-server').addEventListener('click', backToServer);
 
 // ---------- 起動 ----------
 
@@ -741,11 +874,12 @@ function selectedFromHash() {
 
 $('filter').addEventListener('input', renderList);
 $('copy-name').addEventListener('click', () => { const f = currentFile(); if (f) copyText(f.name, 'ファイル名'); });
-$('copy-path').addEventListener('click', () => { const f = currentFile(); if (f) copyText(f.absPath, 'パス'); });
+$('copy-path').addEventListener('click', () => { const f = currentFile(); if (f) copyText(...pathCopy(f)); });
 $('reset-view').addEventListener('click', () => viewer.fit());
 $('opt-grid').addEventListener('change', (e) => viewer.setGrid(e.target.checked));
 $('opt-edges').addEventListener('change', (e) => viewer.setWire(e.target.checked));
 window.addEventListener('hashchange', () => {
+  if (isLocal()) return;
   const p = selectedFromHash();
   if (p && p !== state.selected) select(p);
 });
@@ -753,8 +887,8 @@ window.addEventListener('hashchange', () => {
 (async () => {
   try {
     const info = await getJSON('/api/info');
-    $('root-path').textContent = info.root;
-    $('root-path').title = info.root;
+    $('root-path').dataset.server = info.root;
+    updateSourceUI(info.root);
   } catch (e) { /* 表示のみ */ }
   await refreshFiles();
   const p = selectedFromHash();
