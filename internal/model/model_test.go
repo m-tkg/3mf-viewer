@@ -405,3 +405,22 @@ func TestLoadBytesErrors(t *testing.T) {
 		t.Error("empty stl accepted")
 	}
 }
+
+func TestParse3MFVertexLimitAcrossExternalFiles(t *testing.T) {
+	oldV := maxVertices
+	defer func() { maxVertices = oldV }()
+	main := `<model xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06"><resources>
+<object id="9" type="model"><components><component p:path="/3D/o1.model" objectid="1"/><component p:path="/3D/o2.model" objectid="1"/></components></object>
+</resources><build><item objectid="9"/></build></model>`
+	sub := `<model xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources><object id="1" type="model">` + tetra + `</object></resources></model>`
+	p := make3MF(t, map[string]string{"_rels/.rels": rels, "3D/3dmodel.model": main, "3D/o1.model": sub, "3D/o2.model": sub})
+
+	maxVertices = 7 // 各ファイル 4 頂点 (単体では上限内) だが、合計 8 > 7
+	if _, err := Parse3MF(p); err == nil {
+		t.Error("vertex limit should apply across external model files")
+	}
+	maxVertices = 8
+	if _, err := Parse3MF(p); err != nil {
+		t.Errorf("within total limit should pass: %v", err)
+	}
+}

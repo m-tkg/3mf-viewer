@@ -278,12 +278,14 @@ const thumbs = (() => {
   const MAX_THUMB_TRIANGLES = 1_500_000;
   const BIG_MARK = 'big'; // localStorage 上で「巨大のため省略」を表す値
   const sigOf = (f) => `${f.size}:${f.modTime}`;
-  // ブラウザで選んだフォルダのファイルは、サーバ側の同名パスと混ざらないよう別の名前空間にする。
-  const keyOf = (path) => (isLocal() ? `local:${state.localRoot}/${path}` : path);
+  // ブラウザで選んだフォルダのファイルは、サーバ側の同名パスや、別のフォルダ (同名でも) と混ざらないよう、
+  // フォルダを開くたびに変わる世代 (state.gen) 付きの名前空間にし、localStorage には保存しない。
+  const keyOf = (path) => (isLocal() ? `local:${state.gen}:${path}` : path);
   const lsKeyOf = (path) => `3mfv:thumb:${keyOf(path)}`;
   const lsKey = (f) => lsKeyOf(f.path);
 
   function lsGet(f) {
+    if (isLocal()) return null;
     try {
       const raw = localStorage.getItem(lsKey(f));
       if (!raw) return null;
@@ -293,6 +295,7 @@ const thumbs = (() => {
     } catch (e) { return null; }
   }
   function lsSet(f, url) {
+    if (isLocal()) return;
     const val = `${sigOf(f)}|${url}`;
     try {
       localStorage.setItem(lsKey(f), val);
@@ -445,6 +448,7 @@ const thumbs = (() => {
   function reset() {
     queue.length = 0;
     queued.clear();
+    for (const k of [...mem.keys()]) if (k.startsWith('local:')) mem.delete(k); // 前のフォルダ分の Data URL を捨てる
   }
 
   return { observe: (el) => io.observe(el), forget, move, reset };

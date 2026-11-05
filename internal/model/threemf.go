@@ -122,7 +122,8 @@ func Parse3MFReader(r io.ReaderAt, size int64) (*Model, error) {
 	// z.open は大文字小文字・先頭 "/" を区別しないので、キャッシュキーも同じ規則で正規化する。
 	normKey := func(n string) string { return strings.ToLower(strings.TrimPrefix(n, "/")) }
 	loaded := map[string]*modelFile{normKey(rootPath): root}
-	loadedTris := root.triCount // 外部ファイルを含む総三角形数
+	loadedTris := root.triCount   // 外部ファイルを含む総三角形数
+	loadedVerts := root.vertCount // 外部ファイルを含む総頂点数
 	getFile := func(name string) (*modelFile, error) {
 		if name == "" {
 			return root, nil
@@ -138,6 +139,10 @@ func Parse3MFReader(r io.ReaderAt, size int64) (*Model, error) {
 		loadedTris += mf.triCount
 		if loadedTris > maxTriangles {
 			return nil, errors.New("3MF: too many triangles")
+		}
+		loadedVerts += mf.vertCount
+		if loadedVerts > maxVertices {
+			return nil, errors.New("3MF: too many vertices")
 		}
 		loaded[key] = mf
 		return mf, nil
