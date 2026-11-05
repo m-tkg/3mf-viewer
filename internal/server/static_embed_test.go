@@ -2,6 +2,7 @@ package server
 
 import (
 	"io/fs"
+	"path"
 	"regexp"
 	"strings"
 	"testing"
@@ -36,21 +37,41 @@ func TestEmbeddedStaticHasRequiredFiles(t *testing.T) {
 	}
 }
 
-// app.js の相対 import が、すべて埋め込み FS に存在すること。
-func TestAppJSImportsResolve(t *testing.T) {
-	b, err := fs.ReadFile(staticFS, "static/app.js")
+// static 配下の全 .js の import 指定子が相対パスで、埋め込み FS 上に解決できること。
+// ベア指定子 ('three' 等) は import map が無く CSP も厳格なためブラウザで解決できない。
+func TestStaticJSImportsResolve(t *testing.T) {
+	re := regexp.MustCompile(`(?:\bfrom|\bimport)\s*['"]([^'"]+)['"]`)
+	dyn := regexp.MustCompile(`\bimport\s*\(`)
+	checked := 0
+	err := fs.WalkDir(staticFS, "static", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".js") {
+			return err
+		}
+		b, err := fs.ReadFile(staticFS, p)
+		if err != nil {
+			return err
+		}
+		if dyn.Match(b) {
+			t.Errorf("%s: 動的 import は検証対象外。テストを拡張すること", p)
+		}
+		for _, m := range re.FindAllStringSubmatch(string(b), -1) {
+			spec := m[1]
+			if !strings.HasPrefix(spec, "./") && !strings.HasPrefix(spec, "../") {
+				t.Errorf("%s: 相対でない import 指定子 %q", p, spec)
+				continue
+			}
+			target := path.Join(path.Dir(p), spec)
+			if _, err := fs.Stat(staticFS, target); err != nil {
+				t.Errorf("%s: import %q が埋め込みに無い (%s): %v", p, spec, target, err)
+			}
+			checked++
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	re := regexp.MustCompile(`from\s+'(\./[^']+)'`)
-	ms := re.FindAllStringSubmatch(string(b), -1)
-	if len(ms) == 0 {
-		t.Fatal("import が見つからない")
-	}
-	for _, m := range ms {
-		p := "static/" + strings.TrimPrefix(m[1], "./")
-		if _, err := fs.Stat(staticFS, p); err != nil {
-			t.Errorf("import %s が埋め込みに無い: %v", m[1], err)
-		}
+	if checked == 0 {
+		t.Fatal("import が 1 件も検査されていない")
 	}
 }
